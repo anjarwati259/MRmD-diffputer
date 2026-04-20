@@ -1,0 +1,1 @@
+{" State-gov": "0000", " Self-emp-not-inc": "0001", " Private": "0010", " Federal-gov": "0011", " Local-gov": "0100", " ?": "0101", " Self-emp-inc": "0110", " Without-pay": "0111", " Never-worked": "1000"}
