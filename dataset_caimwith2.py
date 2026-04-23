@@ -51,10 +51,9 @@ class CAIMDiscretizer:
     """
 
     def __init__(self):
-        self.cut_points_     = []   # list of np.ndarray, satu per kolom
-        self.n_bins_         = []   # list of int, jumlah bin per kolom
-        self.bin_means_      = []   # list of np.ndarray (legacy, tidak dipakai langsung)
-        self.bin_means_real_ = []   # list of np.ndarray — mean nilai asli (skala norm) per bin
+        self.cut_points_ = []   # list of np.ndarray, satu per kolom
+        self.n_bins_     = []   # list of int, jumlah bin per kolom
+        self.bin_means_  = []   # list of np.ndarray (legacy, tidak dipakai langsung)
 
     # ── CAIM helpers ─────────────────────────────────────────────────────
 
@@ -205,37 +204,6 @@ class CAIMDiscretizer:
 
         return self
 
-    def fit_with_norm(self, X_raw: np.ndarray, y: np.ndarray,
-                      X_norm: np.ndarray) -> 'CAIMDiscretizer':
-        """
-        Fit CAIM pada nilai raw, lalu simpan mean nilai normalisasi per bin
-        sebagai representasi rekonstruksi yang benar.
-
-        X_raw  : [N, n_cols]  float — nilai asli (raw) untuk menentukan cut points
-        y      : [N]          int   — label kelas
-        X_norm : [N, n_cols]  float — nilai ternormalisasi (skala (X-mean)/std)
-                               dipakai untuk hitung bin_means_real_
-        """
-        self.fit(X_raw, y)
-
-        n_cols = X_raw.shape[1]
-        binned = self.transform(X_raw)   # [N, n_cols] bin index
-
-        self.bin_means_real_ = []
-        for col in range(n_cols):
-            n_bins = self.n_bins_[col]
-            means  = np.zeros(n_bins, dtype=np.float32)
-            for b in range(n_bins):
-                mask = binned[:, col] == b
-                if mask.sum() > 0:
-                    means[b] = float(X_norm[mask, col].mean())
-                else:
-                    # Fallback: posisi relatif bin jika bin kosong
-                    means[b] = float(b) / max(n_bins - 1, 1)
-            self.bin_means_real_.append(means)
-
-        return self
-
     def transform(self, X: np.ndarray) -> np.ndarray:
         """
         Transform nilai kontinu → integer bin index [0, n_bins-1].
@@ -284,25 +252,8 @@ class CAIMDiscretizer:
 
         return midpoints
 
-    def get_bin_means_real(self) -> list:
-        """
-        Kembalikan bin_means_real_ yang sudah di-compute saat fit_with_norm().
 
-        Return : list[n_cols] of np.ndarray  — mean nilai normalisasi per bin
-                 Ini adalah representasi yang benar untuk MAE/RMSE:
-                 mean nilai asli per bin lebih akurat daripada midpoint geometris
-                 karena mencerminkan distribusi data yang sebenarnya.
-
-        Raises : RuntimeError jika fit_with_norm() belum pernah dipanggil.
-        """
-        if not self.bin_means_real_:
-            raise RuntimeError(
-                "bin_means_real_ kosong. Panggil fit_with_norm() terlebih dahulu, "
-                "bukan fit()."
-            )
-        return self.bin_means_real_
-
-
+# ===========================================================================
 #  Supervised Learnable Embedding Model (TIDAK BERUBAH)
 # ===========================================================================
 
@@ -805,25 +756,19 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         # Fit CAIM pada train (observed) dengan label → transform train & test
         # CAIM difit pada nilai RAW (bukan normalisasi) untuk konsistensi cut point
         t_caim_start = time.time()
-        # [FIX] Gunakan fit_with_norm agar bin_means_real_ tersimpan.
-        # bin_means_real_ = mean nilai normalisasi per bin → lebih akurat untuk MAE/RMSE
-        # dibanding midpoint geometris karena mencerminkan distribusi data asli.
-        caim.fit_with_norm(train_num_raw, train_labels, train_num_norm)
+        caim.fit(train_num_raw, train_labels)
 
         train_num_bin = caim.transform(train_num_raw)   # [N_train, n_num_cols] int64
         test_num_bin  = caim.transform(test_num_raw)    # [N_test,  n_num_cols] int64
 
-        # [FIX] bin_midpoints sekarang menggunakan mean nilai asli per bin (bukan
-        # midpoint geometris). Nama variabel dipertahankan agar interface tidak berubah.
-        bin_midpoints = caim.get_bin_means_real()
+        # Hitung bin midpoints dalam skala NORMALISASI
+        # (dipakai saat decoding: bin index → nilai kontinu untuk MAE/RMSE)
+        bin_midpoints = caim.get_bin_midpoints(train_num_norm, train_num_bin)
         t_caim_end = time.time()
         t_caim = t_caim_end - t_caim_start
 
         print(f'[CAIM] n_bins per kolom: {caim.n_bins_}')
         print(f'[CAIM] Total bins: {sum(caim.n_bins_)}')
-        print(f'[CAIM] bin_means_real per kolom (sampel):')
-        for ci, bm in enumerate(bin_midpoints):
-            print(f'         col {ci}: {bm}')
         print(f'[CAIM] Waktu komputasi diskritisasi: {t_caim:.4f}s')
 
     else:
@@ -1097,8 +1042,7 @@ def get_eval(dataname, X_recon, X_true, truth_all_idx,
         rmse = float(np.sqrt((diff ** 2).mean()))
 
     # ── Kategorikal: Akurasi via Linear Decoder ───────────────────────────
-    # ACC hanya dihitung dari kolom kategorikal ASLI (indeks n_num_cols ke atas).
-    # Kolom numerik dievaluasi dengan MAE dan RMSE saja (di atas).
+    # [TIDAK BERUBAH] — logika sama, hanya offset kolom bergeser
     acc = np.nan
     if (truth_all_idx is not None
             and len(cat_col_idx) > 0
