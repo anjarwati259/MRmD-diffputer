@@ -854,11 +854,30 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
             result[:, cum[j]:cum[j + 1]] = np.tile(col_mask, sizes[j])
         return result
 
+    # ext_train_cat_mask = extend_mask_emb(train_cat_mask, emb_sizes_arr)
+    # ext_test_cat_mask  = extend_mask_emb(test_cat_mask,  emb_sizes_arr)
+
+    # extend_train_mask = np.concatenate([train_num_mask, ext_train_cat_mask], axis=1)
+    # extend_test_mask  = np.concatenate([test_num_mask,  ext_test_cat_mask],  axis=1)
+
+    # SEBELUM (salah — memakai emb_sizes per kolom):
+    emb_sizes_arr = np.array(emb_sizes, dtype=int)
     ext_train_cat_mask = extend_mask_emb(train_cat_mask, emb_sizes_arr)
     ext_test_cat_mask  = extend_mask_emb(test_cat_mask,  emb_sizes_arr)
 
+    # SESUDAH (benar — DAE output = hidden_dim, bukan sum(emb_sizes)):
+    total_emb_dim = emb_model.hidden_dim  # 256
+    # Jika ada kolom cat yang missing, seluruh 256 dim dianggap missing
+    # Caranya: OR across all cat columns → satu mask [N, 1] → tile ke [N, 256]
+    cat_any_missing = train_cat_mask.any(axis=1, keepdims=True)  # [N, 1]
+    ext_train_cat_mask = np.tile(cat_any_missing, (1, total_emb_dim))  # [N, 256]
+
+    cat_any_missing_test = test_cat_mask.any(axis=1, keepdims=True)
+    ext_test_cat_mask  = np.tile(cat_any_missing_test, (1, total_emb_dim))
+
     extend_train_mask = np.concatenate([train_num_mask, ext_train_cat_mask], axis=1)
     extend_test_mask  = np.concatenate([test_num_mask,  ext_test_cat_mask],  axis=1)
+    # Sekarang shape: [N, num_num + 256] = [N, 266] ✓ cocok dengan train_X
 
     return (train_X, test_X,
             train_mask, test_mask,
