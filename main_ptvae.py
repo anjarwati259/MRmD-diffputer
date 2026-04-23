@@ -10,7 +10,7 @@ import time
 from tqdm import tqdm
 
 from model import MLPDiffusion, Model
-from dataset_class import (load_dataset, get_eval, mean_std,
+from dataset_ptvae import (load_dataset, get_eval, mean_std,
                      decode_cat_from_embedding)
 from diffusion_utils import sample_step, impute_mask
 
@@ -404,7 +404,7 @@ if __name__ == '__main__':
                             f'{split_idx}/{num_trials}_{num_steps}')
         os.makedirs(result_save_path, exist_ok=True)
 
-        with open(f'{result_save_path}/result_class.txt', 'a+') as f:
+        with open(f'{result_save_path}/result_ptvae.txt', 'a+') as f:
             f.write(
                 f'iteration {iteration}, '
                 f'MAE: in-sample={mae:.6f}, out-of-sample={mae_out:.6f}\n'

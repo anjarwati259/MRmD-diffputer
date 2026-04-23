@@ -10,7 +10,7 @@ import time
 from tqdm import tqdm
 
 from model import MLPDiffusion, Model
-from dataset_class import (load_dataset, get_eval, mean_std,
+from dataset_vime import (load_dataset, get_eval, mean_std,
                      decode_cat_from_embedding)
 from diffusion_utils import sample_step, impute_mask
 
@@ -62,14 +62,15 @@ if __name__ == '__main__':
     #  efek "RuntimeError: Expected a 'cuda' device type for generator but
     #  found 'cpu'". DataLoader PyTorch membutuhkan generator CPU untuk shuffle.
     #
-    #  train_X / test_X : [N, num_num + total_emb_dim]
-    #    fitur kategorik sudah di-encode ke embedding (bukan binary encoding)
+    #  [MODIFIKASI VIME] train_X / test_X : [N, hidden_dim]
+    #    SEMUA fitur kategorikal sudah di-encode ke VIME embedding.
+    #    len_num = 0 karena tidak ada kolom raw numerik di train_X.
     # =========================================================================
     (train_X, test_X,
      ori_train_mask, ori_test_mask,
      train_num, test_num,
      train_cat_idx, test_cat_idx,
-     extend_train_mask, extend_test_mask,   # shape [N, num_num+total_emb_dim] ← untuk normalisasi & diffusion
+     extend_train_mask, extend_test_mask,
      cat_bin_num,
      emb_model,
      emb_sizes
@@ -89,7 +90,8 @@ if __name__ == '__main__':
     #  Sama persis dengan kode asli:
     #    - mean & std dihitung hanya pada observed entries (bukan missing)
     #    - normalisasi: (X - mean) / std / 2
-    #  Catatan: embedding sudah berbasis float, sehingga normalisasi ini valid.
+    #  Catatan: train_X sekarang hanya berisi embedding VIME (tidak ada raw numerik).
+    #  extend_train_mask shape sudah cocok dengan train_X (hidden_dim).
     # =========================================================================
     mean_X, std_X = mean_std(train_X, extend_train_mask)   # mask shape cocok dengan train_X
     std_X[std_X == 0] = 1.0    # jaga kolom konstan agar tidak NaN saat /std
@@ -108,8 +110,9 @@ if __name__ == '__main__':
     mean_X_gpu = torch.tensor(mean_X, device=device, dtype=torch.float32)
     std_X_gpu  = torch.tensor(std_X,  device=device, dtype=torch.float32)
 
-    # Panjang fitur numerik (dipakai untuk memisahkan num / cat di output)
-    len_num = train_num.shape[1]
+    # [MODIFIKASI VIME] len_num = 0 karena tidak ada kolom raw numerik di train_X.
+    # Seluruh isi train_X adalah embedding VIME (kategorikal).
+    len_num = 0
 
     MAEs,  RMSEs,  ACCs  = [], [], []
     MAEs_out, RMSEs_out, ACCs_out = [], [], []
@@ -269,28 +272,18 @@ if __name__ == '__main__':
                 (rec_X * 2).cpu().numpy())
 
         # =====================================================================
-        #  Denormalisasi In-sample — mengikuti POLA ASLI DiffPutter
+        #  Denormalisasi In-sample
         #
-        #  Pola asli (binary encoding):
-        #    pred_X = rec_X * 2              → undo /2, skala (X-mean)/std
-        #    pred_X[:, len_num:] = pred_X[:, len_num:] * std + mean
-        #                                    → kembalikan kategorikal ke bit {0,1}
-        #    MAE/RMSE dihitung pada numerik yang MASIH di skala (X-mean)/std
+        #  [MODIFIKASI VIME] Semua dimensi adalah embedding VIME (tidak ada raw numerik).
+        #  Seluruh dimensi di-denorm ke skala embedding asli untuk decoding.
         #
-        #  Pola embedding (analog):
-        #    pred_X = rec_X * 2              → undo /2, skala (X-mean)/std
-        #    pred_X[:, len_num:] = pred_X[:, len_num:] * std_emb + mean_emb
-        #                                    → kembalikan embedding ke skala asli
-        #                                       (skala yang dipakai saat emb_model di-train)
-        #    MAE/RMSE dihitung pada numerik yang MASIH di skala (X-mean)/std
-        #    → konsisten dengan metrik asli DiffPutter
-        #
-        #  Mengapa range tidak perlu seragam antara num dan emb setelah ini?
-        #  Karena get_eval memisahkan: numerik untuk MAE/RMSE, embedding
-        #  untuk decode kelas (akurasi). Keduanya tidak dibandingkan langsung.
+        #  Alur:
+        #    rec_X (skala /2) → * 2 → skala (X-mean)/std
+        #    → * std + mean   → skala embedding asli
+        #    → decode_cat_from_embedding → Accuracy kategorikal
         # =====================================================================
 
-        rec_X_np  = rec_X.cpu().numpy()    # [N, num_num + total_emb_dim], skala /2
+        rec_X_np  = rec_X.cpu().numpy()    # [N, hidden_dim], skala /2
         X_true_np = X.cpu().numpy()        # sama
         mean_np   = mean_X_gpu.cpu().numpy()
         std_np    = std_X_gpu.cpu().numpy()
@@ -299,20 +292,17 @@ if __name__ == '__main__':
         pred_X = rec_X_np * 2
         X_true = X_true_np * 2
 
-        # Step 2: hanya bagian EMBEDDING yang di-denorm ke skala embedding asli
-        # (numerik dibiarkan di skala ternormalisasi, sama dengan pola asli)
-        if len_num < pred_X.shape[1]:
-            pred_X[:, len_num:] = (pred_X[:, len_num:]
-                                   * std_np[len_num:] + mean_np[len_num:])
-            X_true[:, len_num:] = (X_true[:, len_num:]
-                                   * std_np[len_num:] + mean_np[len_num:])
+        # Step 2: denorm SELURUH dimensi embedding ke skala asli
+        # (semua dimensi adalah embedding VIME, tidak ada split num/emb)
+        pred_X = pred_X * std_np + mean_np
+        X_true = X_true * std_np + mean_np
 
         mae, rmse, acc = get_eval(
             dataname     = dataname,
             X_recon      = pred_X,
             X_true       = X_true,
             truth_cat_idx= train_cat_idx,
-            num_num      = len_num,
+            num_num      = len_num,          # selalu 0 di pipeline VIME
             emb_model    = emb_model,
             emb_sizes    = emb_sizes,
             mask         = ori_train_mask,
@@ -362,27 +352,22 @@ if __name__ == '__main__':
 
         rec_X = torch.stack(rec_Xs, dim=0).mean(0)
 
-        # =====================================================================
-        #  Denormalisasi Out-of-sample — pola sama dengan in-sample
-        # =====================================================================
+        # ── Denormalisasi Out-of-sample (sama dengan in-sample) ──────────
         rec_X_np  = rec_X.cpu().numpy()
         X_true_np = X_test.cpu().numpy()
 
         pred_X = rec_X_np * 2
         X_true = X_true_np * 2
 
-        if len_num < pred_X.shape[1]:
-            pred_X[:, len_num:] = (pred_X[:, len_num:]
-                                   * std_np[len_num:] + mean_np[len_num:])
-            X_true[:, len_num:] = (X_true[:, len_num:]
-                                   * std_np[len_num:] + mean_np[len_num:])
+        pred_X = pred_X * std_np + mean_np
+        X_true = X_true * std_np + mean_np
 
         mae_out, rmse_out, acc_out = get_eval(
             dataname     = dataname,
             X_recon      = pred_X,
             X_true       = X_true,
             truth_cat_idx= test_cat_idx,
-            num_num      = len_num,
+            num_num      = len_num,          # selalu 0 di pipeline VIME
             emb_model    = emb_model,
             emb_sizes    = emb_sizes,
             mask         = ori_test_mask,
@@ -404,7 +389,7 @@ if __name__ == '__main__':
                             f'{split_idx}/{num_trials}_{num_steps}')
         os.makedirs(result_save_path, exist_ok=True)
 
-        with open(f'{result_save_path}/result_class.txt', 'a+') as f:
+        with open(f'{result_save_path}/result_class_vime.txt', 'a+') as f:
             f.write(
                 f'iteration {iteration}, '
                 f'MAE: in-sample={mae:.6f}, out-of-sample={mae_out:.6f}\n'
