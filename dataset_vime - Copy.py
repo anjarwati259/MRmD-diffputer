@@ -162,59 +162,31 @@ class VIMEEmbeddingModel(nn.Module):
 
     # ── Corrupt generation (Eq. 3, paper Section 4.1) ─────────────────────
 
-    # def corrupt(self, x_onehot: torch.Tensor) -> tuple:
-    #     """
-    #     Generate corrupted sample x_tilde dan mask m.
+    def corrupt(self, x_onehot: torch.Tensor) -> tuple:
+        """
+        Generate corrupted sample x_tilde dan mask m.
 
-    #     x_tilde = m ⊙ x_bar + (1-m) ⊙ x
-    #     m_j ~ Bernoulli(p_m) per fitur (dimensi one-hot)
-    #     x_bar[j] sampled dari empirical marginal (shuffled rows)
+        x_tilde = m ⊙ x_bar + (1-m) ⊙ x
+        m_j ~ Bernoulli(p_m) per fitur (dimensi one-hot)
+        x_bar[j] sampled dari empirical marginal (shuffled rows)
 
-    #     Return: (x_tilde, m)  — keduanya [batch, input_dim]
-    #     """
-    #     batch_size = x_onehot.shape[0]
-    #     device     = x_onehot.device
+        Return: (x_tilde, m)  — keduanya [batch, input_dim]
+        """
+        batch_size = x_onehot.shape[0]
+        device     = x_onehot.device
 
-    #     # Mask: Bernoulli per dimensi (sesuai paper Eq. 3)
-    #     m = torch.bernoulli(
-    #         torch.full_like(x_onehot, self.p_m)
-    #     )  # [batch, input_dim]
+        # Mask: Bernoulli per dimensi (sesuai paper Eq. 3)
+        m = torch.bernoulli(
+            torch.full_like(x_onehot, self.p_m)
+        )  # [batch, input_dim]
 
-    #     # x_bar: empirical marginal — shuffle rows secara random
-    #     perm  = torch.randperm(batch_size, device=device)
-    #     x_bar = x_onehot[perm]   # [batch, input_dim]
+        # x_bar: empirical marginal — shuffle rows secara random
+        perm  = torch.randperm(batch_size, device=device)
+        x_bar = x_onehot[perm]   # [batch, input_dim]
 
-    #     # x_tilde = m ⊙ x_bar + (1 - m) ⊙ x  (Eq. 3)
-    #     x_tilde = m * x_bar + (1.0 - m) * x_onehot
-
-    #     return x_tilde, m
-    
-    def corrupt(self, x_onehot: torch.Tensor):
-        batch_size, dim = x_onehot.shape
-        device = x_onehot.device
-
-        # 🔥 FIX: mask per feature (kolom)
-        m = torch.zeros_like(x_onehot)
-
-        for j in range(self.n_cols):
-            start = self._offsets[j]
-            end   = self._offsets[j+1]
-
-            # satu mask untuk satu feature
-            mask_j = torch.bernoulli(
-                torch.full((batch_size, 1), self.p_m, device=device)
-            )
-
-            # broadcast ke seluruh dimensi one-hot feature tsb
-            m[:, start:end] = mask_j
-
-        # x_bar (pakai versi fix dari poin 1)
-        x_bar = torch.zeros_like(x_onehot)
-        for j in range(dim):
-            perm = torch.randperm(batch_size, device=device)
-            x_bar[:, j] = x_onehot[perm, j]
-
+        # x_tilde = m ⊙ x_bar + (1 - m) ⊙ x  (Eq. 3)
         x_tilde = m * x_bar + (1.0 - m) * x_onehot
+
         return x_tilde, m
 
     # ── Forward pass ──────────────────────────────────────────────────────
@@ -494,8 +466,45 @@ def decode_cat_from_embedding(model: 'VIMEEmbeddingModel',
 # ===========================================================================
 
 def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
+    """
+    Load dataset dengan VIME self-supervised embedding untuk kolom kategorikal.
+
+    Perubahan dari versi supervised:
+    - Embedding menggunakan VIME self-supervised encoder (bukan supervised)
+    - train_X / test_X : [N, hidden_dim] — seluruh embedding VIME
+    - len_num = 0 di main karena tidak ada kolom raw numerik di train_X
+
+    Output tambahan (dibanding versi supervised):
+    - train_num / test_num tetap dikembalikan (nilai float asli, ternormalisasi)
+      untuk keperluan evaluasi MAE/RMSE di skala normalisasi
+
+    Parameters
+    ----------
+    dataname : str
+    idx : int
+    mask_type : str
+    ratio : str or int
+
+    Return
+    ------
+    train_X           : [N_train, hidden_dim]  float32
+    test_X            : [N_test,  hidden_dim]  float32
+    ori_train_mask    : mask asli train [N_train, total_cols]
+    ori_test_mask     : mask asli test  [N_test,  total_cols]
+    train_num         : [N_train, num_num]  — hanya numerik (ternormalisasi)
+    test_num          : [N_test,  num_num]
+    train_cat_idx     : [N_train, n_cat_cols] integer index  (atau None)
+    test_cat_idx      : [N_test,  n_cat_cols] integer index  (atau None)
+    extend_train_mask : mask yang sudah diperluas ke dimensi hidden_dim
+    extend_test_mask  : mask yang sudah diperluas ke dimensi hidden_dim
+    cat_bin_num       : None  (tidak digunakan lagi)
+    emb_model         : VIMEEmbeddingModel  (atau None jika no cat)
+    emb_sizes         : list[int] dimensi embedding per kolom (atau None)
+    """
+    # Convert ratio to string if needed
     ratio = str(ratio)
 
+    # ── Paths sama persis dengan original ────────────────────────────────
     data_dir  = f'datasets/{dataname}'
     info_path = f'datasets/Info/{dataname}.json'
 
@@ -512,6 +521,7 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
     train_mask_path = f'{data_dir}/masks/rate{ratio}/{mask_type}/train_mask_{idx}.npy'
     test_mask_path  = f'{data_dir}/masks/rate{ratio}/{mask_type}/test_mask_{idx}.npy'
 
+    # ── Load files sama persis dengan original ───────────────────────────
     data_df  = pd.read_csv(data_path)
     train_df = pd.read_csv(train_path)
     test_df  = pd.read_csv(test_path)
@@ -521,16 +531,12 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
 
     cols = train_df.columns
 
-    # =========================
-    # NUMERIK
-    # =========================
+    # ── Fitur numerik ────────────────────────────────────────────────────
     data_num  = data_df[cols[num_col_idx]].values.astype(np.float32)
     train_num = train_df[cols[num_col_idx]].values.astype(np.float32)
     test_num  = test_df[cols[num_col_idx]].values.astype(np.float32)
 
-    # =========================
-    # LABEL (tidak dipakai VIME, hanya kompatibilitas)
-    # =========================
+    # ── Extract labels (untuk kompatibilitas signature) ──────────────────
     train_y = train_df[cols[target_col_idx]]
     test_y  = test_df[cols[target_col_idx]]
 
@@ -542,11 +548,10 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
     test_labels  = label_encoder.transform(test_y.values.ravel().astype(str))
     n_classes    = len(label_encoder.classes_)
 
-    print(f'[Dataset] Detected {n_classes} classes')
+    print(f'[Dataset] Detected {n_classes} classes for supervised learning')
+    print(f'[Dataset] Classes: {label_encoder.classes_}')
 
-    # =========================
-    # KASUS: TIDAK ADA KATEGORIKAL
-    # =========================
+    # ── Kasus: hanya fitur numerik ───────────────────────────────────────
     if len(cat_col_idx) == 0:
         train_X = train_num
         test_X  = test_num
@@ -559,17 +564,18 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
                 train_num, test_num,
                 None, None,
                 extend_train_mask, extend_test_mask,
-                None, None, None)
+                None,   # cat_bin_num (legacy, tidak dipakai)
+                None,   # emb_model
+                None)   # emb_sizes
 
-    # =========================
-    # KATEGORIKAL → INDEX
-    # =========================
+    # ── Kasus: ada fitur kategorikal → VIME Embedding ────────────────────
     cat_columns = cols[cat_col_idx]
 
     data_cat  = data_df[cat_columns].astype(str)
     train_cat = train_df[cat_columns].astype(str)
     test_cat  = test_df[cat_columns].astype(str)
 
+    # Label encoding: fit pada seluruh data (data.csv) agar konsisten
     encoders           = {}
     cat_dims           = []
     train_cat_idx_list = []
@@ -577,8 +583,7 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
 
     for col in cat_columns:
         le = LabelEncoder()
-        le.fit(data_cat[col])
-
+        le.fit(data_cat[col])             # fit pada semua data
         encoders[col] = le
         cat_dims.append(len(le.classes_))
 
@@ -589,94 +594,90 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30'):
             le.transform(test_cat[col]).astype(np.int64)
         )
 
-    train_cat_idx = np.stack(train_cat_idx_list, axis=1)
-    test_cat_idx  = np.stack(test_cat_idx_list,  axis=1)
+    train_cat_idx = np.stack(train_cat_idx_list, axis=1)  # [N_train, n_cat]
+    test_cat_idx  = np.stack(test_cat_idx_list,  axis=1)  # [N_test,  n_cat]
 
-    # =========================
-    # TRAIN VIME
-    # =========================
+    # VIME hidden_dim: ukuran representasi encoder (output VIME = [N, hidden_dim])
     vime_hidden_dim = 256
+    emb_sizes = [vime_hidden_dim] * len(cat_dims)   # placeholder per kolom
 
+    print(f'[VIME] cat_dims={cat_dims}')
+    print(f'[VIME] input_dim (total one-hot)={sum(cat_dims)}, hidden_dim={vime_hidden_dim}')
+
+    # Tentukan device (gunakan CUDA jika tersedia; main.py akan overwrite)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    print('[VIME] Training encoder...')
+    # Latih VIME self-supervised encoder menggunakan data TRAIN
+    print('[VIME] Melatih VIME self-supervised encoder '
+          '(mask estimation + feature reconstruction loss) ...')
     emb_model = train_supervised_embedding_model(
         cat_idx_array = train_cat_idx,
         labels        = train_labels,
         cat_dims      = cat_dims,
-        emb_sizes     = [vime_hidden_dim]*len(cat_dims),
+        emb_sizes     = emb_sizes,
         n_classes     = n_classes,
         device        = device,
         n_epochs      = 1000,
         batch_size    = 1024,
         lr            = 1e-3,
+        dropout       = 0.1,
         hidden_dim    = vime_hidden_dim,
+        use_mlp       = True,
+        mlp_ratio     = 1.5,
+        noise_std     = 0.01,
         patience      = 40,
     )
+    print('[VIME] Training selesai. Parameter di-freeze untuk diffusion.')
 
-    print('[VIME] Encoding...')
+    # Encode: integer index → representasi VIME z
     train_cat_emb = encode_with_embedding(emb_model, train_cat_idx, device)
     test_cat_emb  = encode_with_embedding(emb_model, test_cat_idx,  device)
+    # shape: [N, hidden_dim]
+    print("dimensi embedding: ", train_cat_emb.shape)
 
-    # =========================
-    # GABUNG DATA
-    # =========================
-    train_X = np.concatenate([train_num, train_cat_emb], axis=1)
-    test_X  = np.concatenate([test_num,  test_cat_emb],  axis=1)
+    # ── train_X / test_X sekarang HANYA embedding (tidak ada kolom raw num) ─
+    # Numerik TIDAK digabung ke train_X — numerik disimpan terpisah di train_num
+    # untuk kompatibilitas get_eval dan normalisasi diffusion.
+    # len_num di main.py = 0 karena seluruh isi train_X adalah embedding.
+    train_X = train_cat_emb
+    test_X  = test_cat_emb
 
-    # =========================
-    # MASK NUMERIK
-    # =========================
-    train_num_mask = train_mask[:, num_col_idx].astype(bool)
-    test_num_mask  = test_mask[:, num_col_idx].astype(bool)
+    # ── Buat extended mask untuk VIME ────────────────────────────────────
+    # VIME encoder menghasilkan [N, hidden_dim] — satu vektor per sampel.
+    # Mask di level kolom asal [N, n_cols] perlu diperluas ke [N, hidden_dim].
+    #
+    # Strategi: jika suatu sampel memiliki SETIDAKNYA SATU kolom yang missing,
+    # maka seluruh hidden_dim dimensi representasinya ditandai sebagai missing
+    # (karena encoder global merangkum semua kolom ke satu vektor).
+    #
+    # Ini konsisten dengan cara diffusion memanfaatkan mask: posisi True → perlu
+    # diimputasi, posisi False → observed (dipertahankan).
 
-    # =========================
-    # MASK KATEGORIKAL → GLOBAL (VIME)
-    # =========================
+    # Kumpulkan mask kolom kategorikal
     train_cat_mask = train_mask[:, cat_col_idx].astype(bool)
     test_cat_mask  = test_mask[:, cat_col_idx].astype(bool)
 
-    train_cat_missing = train_cat_mask.any(axis=1)
-    test_cat_missing  = test_cat_mask.any(axis=1)
+    # any_missing [N] — True jika sampel memiliki minimal 1 kolom kategorikal missing
+    train_any_missing = train_cat_mask.any(axis=1)   # [N_train]
+    test_any_missing  = test_cat_mask.any(axis=1)    # [N_test]
 
-    hidden_dim = train_cat_emb.shape[1]
-
-    ext_train_cat_mask = np.tile(train_cat_missing[:, None], (1, hidden_dim))
-    ext_test_cat_mask  = np.tile(test_cat_missing[:, None],  (1, hidden_dim))
-
-    # =========================
-    # GABUNG MASK
-    # =========================
-    extend_train_mask = np.concatenate(
-        [train_num_mask, ext_train_cat_mask],
-        axis=1
-    )
-
-    extend_test_mask = np.concatenate(
-        [test_num_mask, ext_test_cat_mask],
-        axis=1
-    )
-
-    # =========================
-    # VALIDASI
-    # =========================
-    assert train_X.shape == extend_train_mask.shape, \
-        f"Train mismatch: {train_X.shape} vs {extend_train_mask.shape}"
-
-    assert test_X.shape == extend_test_mask.shape, \
-        f"Test mismatch: {test_X.shape} vs {extend_test_mask.shape}"
-
-    print(f'[FINAL] train_X: {train_X.shape}')
-    print(f'[FINAL] test_X : {test_X.shape}')
+    # Perluas ke [N, hidden_dim]: sampel yang ada kolom missing →
+    # seluruh hidden_dim di-mask True
+    extend_train_mask = np.tile(
+        train_any_missing[:, np.newaxis], (1, vime_hidden_dim)
+    )   # [N_train, hidden_dim]
+    extend_test_mask  = np.tile(
+        test_any_missing[:, np.newaxis],  (1, vime_hidden_dim)
+    )   # [N_test, hidden_dim]
 
     return (train_X, test_X,
             train_mask, test_mask,
             train_num, test_num,
             train_cat_idx, test_cat_idx,
             extend_train_mask, extend_test_mask,
-            None,
-            emb_model,
-            [vime_hidden_dim])
+            None,       # cat_bin_num (legacy, tidak dipakai)
+            emb_model,  # VIMEEmbeddingModel
+            emb_sizes)  # list[int]
 
 
 def mean_std(data, mask):
@@ -699,15 +700,17 @@ def get_eval(dataname, X_recon, X_true, truth_cat_idx,
     """
     Hitung MAE, RMSE (numerik) dan Accuracy (kategorikal).
 
+    [MODIFIKASI VIME] Seluruh dimensi train_X adalah embedding VIME.
+    num_num = 0 selalu di pipeline ini — tidak ada kolom raw numerik di X_recon.
+
+    MAE/RMSE: tidak dihitung (num_num = 0, tidak ada fitur numerik di embedding).
+    Accuracy: decode embedding VIME → prediksi kelas kategorikal.
+
     Konvensi input:
     ---------------
-    X_recon[:, :num_num]  → fitur numerik (skala ternormalisasi (X-mean)/std)
-    X_recon[:, num_num:]  → embedding VIME (skala asli, sudah di-denorm)
-    truth_cat_idx         : [N, n_cat_cols]  integer index ground truth
-    mask                  : mask ASLI [N, n_original_cols] (bukan extended)
-
-    MAE/RMSE: dihitung pada kolom NUMERIK yang missing (posisi mask=True).
-    Accuracy : decode embedding VIME → prediksi kelas kategorikal yang missing.
+    X_recon / X_true : [N, hidden_dim]
+        Seluruh dimensi adalah embedding VIME.
+    truth_cat_idx    : [N, n_cat_cols]  integer index
     """
     info_path = f'datasets/Info/{dataname}.json'
     with open(info_path, 'r') as f:
@@ -720,11 +723,6 @@ def get_eval(dataname, X_recon, X_true, truth_cat_idx,
     num_mask = mask[:, num_col_idx].astype(bool) if len(num_col_idx) > 0 else None
     cat_mask = mask[:, cat_col_idx].astype(bool) if len(cat_col_idx) > 0 else None
 
-    # Split numerik dan embedding dari X_recon / X_true
-    num_pred     = X_recon[:, :num_num]
-    num_true     = X_true[:, :num_num]
-    cat_emb_pred = X_recon[:, num_num:]
-
     # Special case: news dataset
     if dataname == 'news' and oos:
         drop = 6265
@@ -734,20 +732,13 @@ def get_eval(dataname, X_recon, X_true, truth_cat_idx,
             cat_mask = np.delete(cat_mask, drop, axis=0)
         if truth_cat_idx is not None:
             truth_cat_idx = np.delete(truth_cat_idx, drop, axis=0)
-        num_pred     = np.delete(num_pred,     drop, axis=0)
-        num_true     = np.delete(num_true,     drop, axis=0)
-        cat_emb_pred = np.delete(cat_emb_pred, drop, axis=0)
+        X_recon = np.delete(X_recon, drop, axis=0)
+        X_true  = np.delete(X_true,  drop, axis=0)
 
-    # ── Numerik: MAE & RMSE (hanya pada posisi missing) ──────────────────
+    # ── Numerik: tidak ada kolom raw numerik di embedding VIME ───────────
+    # MAE/RMSE tidak dapat dihitung langsung dari embedding
     mae  = np.nan
     rmse = np.nan
-    if num_num > 0 and num_mask is not None:
-        missing_flat = num_mask.any(axis=1) if num_mask.ndim > 1 else num_mask
-        # Hitung error hanya pada sel yang missing (per elemen, bukan per baris)
-        diff = num_pred[num_mask] - num_true[num_mask]
-        if diff.size > 0:
-            mae  = float(np.abs(diff).mean())
-            rmse = float(np.sqrt((diff ** 2).mean()))
 
     # ── Kategorikal: Akurasi via VIME decode ─────────────────────────────
     acc = np.nan
@@ -757,11 +748,9 @@ def get_eval(dataname, X_recon, X_true, truth_cat_idx,
             and emb_sizes is not None
             and cat_mask is not None):
 
-        # Decode embedding VIME → prediksi kelas per kolom
+        # Decode embedding → prediksi kelas per kolom
         pred_all_idx = decode_cat_from_embedding(
-            emb_model,
-            cat_emb_pred,
-            device
+            emb_model, X_recon, device
         )  # [N, n_cat_cols]
 
         n_cat_cols    = len(cat_col_idx)
