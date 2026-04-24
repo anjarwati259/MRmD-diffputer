@@ -16,14 +16,14 @@ args = get_args_parser().parse_args()
 
 if args.benchmark_mask_ratio:
     #datanames = ['news', 'adult', 'beijing', 'default']
-    datanames = ['beijing']
+    datanames = ['adult']
 elif args.benchmark_sample_size:
     datanames = ['beijing']
 else:
-    datanames = ['bean', 'adult', 'beijing', 'california', 'default', 'gesture', 'letter', 'magic', 'news', 'shoppers']
+    datanames = ['adult']
     
 if args.benchmark_mask_ratio:
-    missing_rates = [0.5, 0.7]
+    missing_rates = [0.3]
 else:
     missing_rates = [args.missing_rate] #0.3
 
