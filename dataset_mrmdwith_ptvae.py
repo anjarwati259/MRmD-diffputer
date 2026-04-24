@@ -381,7 +381,8 @@ class PTVAEEmbeddingModel(nn.Module):
 
     [D] LATENT VARIABLE + FUSION — Section 3.1, Eq. 5 + Fig. 1
         z = mu + sigma * eps,  eps ~ N(0, I)                          (Eq. 5)
-        z_fused = z + c_concept  (simbol ⊕ pada Fig. 1)
+        z_fused = torch.cat([z, c_concept], dim=1)  (⊕ = concat sesuai paper Fig. 1)
+        Output shape: [batch, fused_dim] = [batch, 2 * latent_dim]
 
     [E] MAIN DECODER — p_theta(x|z, c) — Section 3.2, Eq. 6
         x' = p_theta(x | z_fused)
@@ -488,10 +489,13 @@ class PTVAEEmbeddingModel(nn.Module):
 
         # ── [E] MAIN DECODER MLP ─────────────────────────────────────────
         # p_theta(x|z,c): paper Fig. 1 (Decoder bawah), menerima z_fused
-        # Arsitektur simetris dengan encoder
+        # [FIX paper] ⊕ di Fig.1 = CONCATENATION bukan addition.
+        # Decoder menerima [z; c_concept] sehingga input dim = 2 * latent_dim.
         dec_hidden = enc_hidden
+        fused_dim      = self.latent_dim * 2
+        self.fused_dim = fused_dim
         self.decoder_mlp = nn.Sequential(
-            nn.Linear(self.latent_dim, dec_hidden),
+            nn.Linear(fused_dim, dec_hidden),
             nn.SiLU(),
             nn.Dropout(dropout),
             nn.Linear(dec_hidden, dec_hidden),
@@ -503,6 +507,7 @@ class PTVAEEmbeddingModel(nn.Module):
         # ── [F] PRIOR CONCEPT DECODER MLP ────────────────────────────────
         # Decoder terpisah untuk x'_concept dari c_concept (Eq. 12)
         # paper Fig. 1 (Decoder atas, dari c_concept, menghasilkan L_recon)
+        # Input hanya c_concept (latent_dim), sesuai paper Eq. 12
         self.prior_decoder_mlp = nn.Sequential(
             nn.Linear(self.latent_dim, dec_hidden),
             nn.SiLU(),
@@ -522,8 +527,9 @@ class PTVAEEmbeddingModel(nn.Module):
 
         # ── MLP Classifier (auxiliary, dipertahankan) ─────────────────────
         self.dropout    = nn.Dropout(dropout)
+        # [FIX paper] Classifier menerima z_fused (fused_dim)
         self.classifier = nn.Sequential(
-            nn.Linear(self.latent_dim, hidden_dim),
+            nn.Linear(fused_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -533,7 +539,8 @@ class PTVAEEmbeddingModel(nn.Module):
         )
 
         # ── LayerNorm pada z_fused (stabilisasi skala sebelum diffusion) ──
-        self.layer_norm = nn.LayerNorm(self.latent_dim)
+        # [FIX paper] LayerNorm pada fused_dim (z concat c_concept)
+        self.layer_norm = nn.LayerNorm(fused_dim)
 
     # ── Embedding input ───────────────────────────────────────────────────
 
@@ -681,16 +688,19 @@ class PTVAEEmbeddingModel(nn.Module):
           [3] Embed input → Main Encoder → (mu, log_var, T_concept)
           [3] Embed input → Prior Encoder → T_prior
           [4] Gumbel-Softmax(T_concept, T_prior) → c_concept
-          [5] z = mu + sigma*eps; z_fused = z + c_concept
+          [5] z_fused = cat([mu, c_concept])  (deterministik, tanpa sampling)
 
-        Saat eval: tanpa sampling (deterministik).
+        [FIX paper] ⊕ = concatenation sesuai Fig.1, bukan addition.
+        Pakai mu (bukan sample z) agar representasi stabil dan reproducible.
+        Output shape: [N, fused_dim] = [N, 2 * latent_dim]
         """
         x_emb = self._embed_input(x_cat)
         mu, log_var, T_concept = self._encode_to_params(x_emb)
         _, _, T_prior          = self._encode_prior_to_params(x_emb)
         c_concept, _           = self._gumbel_softmax_concept(T_concept, T_prior)
-        z                      = self.reparameterize(mu, log_var)
-        z_fused                = z + c_concept
+        # [FIX paper] ⊕ = concatenation sesuai Fig.1, bukan addition
+        # Deterministik: pakai mu (tanpa sampling) untuk inference yang stabil
+        z_fused                = torch.cat([mu, c_concept], dim=1)
         return self.layer_norm(z_fused)
 
     def encode_with_params(self, x_cat: torch.Tensor):
@@ -706,7 +716,8 @@ class PTVAEEmbeddingModel(nn.Module):
         mu_prior, log_var_prior, T_prior   = self._encode_prior_to_params(x_emb)
         c_concept, q_c_prior               = self._gumbel_softmax_concept(T_concept, T_prior)
         z                                  = self.reparameterize(mu, log_var)
-        z_fused                            = z + c_concept
+        # [FIX paper] ⊕ = concatenation sesuai Fig.1, bukan addition
+        z_fused                            = torch.cat([z, c_concept], dim=1)
         z_normed                           = self.layer_norm(z_fused)
         return (z_normed, mu, log_var, c_concept, q_c_prior, mu_prior, log_var_prior)
 
@@ -765,15 +776,16 @@ class PTVAEEmbeddingModel(nn.Module):
         Clamp mu dan log_var sebelum digunakan untuk mencegah overflow:
         - log_var.exp() overflow jika log_var > ~88 (float32)
         - mu.pow(2) overflow jika |mu| sangat besar
+
+        [FIX] Hapus pembagian / latent_dim yang menyebabkan KL terlalu kecil
+              dan memicu posterior collapse (z tidak membawa informasi).
         """
         log_var_c = torch.clamp(log_var, min=-10.0, max=10.0)
         mu_c      = torch.clamp(mu,      min=-10.0, max=10.0)
         kl = -0.5 * torch.sum(
             1 + log_var_c - mu_c.pow(2) - log_var_c.exp(), dim=1
         )
-        # Normalisasi per dimensi agar setara dengan KL(c) dan CE
-        latent_dim = mu.shape[1]
-        return kl.mean() / latent_dim
+        return kl.mean()
 
     @staticmethod
     def kl_divergence_c(c_concept: torch.Tensor, K: int) -> torch.Tensor:
@@ -812,10 +824,15 @@ class PTVAEEmbeddingModel(nn.Module):
         L_recon = ||x'_concept - x'||^2. Paper Eq. 12.
         Diimplementasikan sebagai MSE antara logit prior concept
         dan logit main reconstruction.
+
+        [FIX] Hapus .detach() pada recon_logits. Dengan .detach(), main decoder
+              tidak mendapat gradient dari L_recon sehingga prior decoder mengejar
+              target yang terus bergerak → L_recon naik terus bukan turun.
+              Kedua decoder sekarang saling terhubung via L_recon.
         """
         loss = torch.tensor(0.0, device=recon_logits[0].device)
         for i in range(n_cols):
-            loss = loss + F.mse_loss(recon_prior_logits[i], recon_logits[i].detach())
+            loss = loss + F.mse_loss(recon_prior_logits[i], recon_logits[i])
         return loss / n_cols
 
     @staticmethod
@@ -825,21 +842,20 @@ class PTVAEEmbeddingModel(nn.Module):
     ) -> torch.Tensor:
         """
         L_KL = KL(q(c_prior|x) || q(c_concept|x)). Paper Eq. 13.
-        q_c_prior dan c_concept adalah output Gumbel-Softmax: keduanya
-        selalu positif dan menjumlah ke 1 (q_p + q_c = 1 per dimensi).
-        Normalisasi ulang untuk menjaga properti ini setelah clamp.
+        q_c_prior dan c_concept adalah output binary Gumbel-Softmax dimana
+        per dimensi: q_c_prior + c_concept = 1.0 (binary competition).
+        Keduanya membentuk distribusi Bernoulli per dimensi.
+
+        [FIX v2] Gunakan KL Bernoulli yang selalu >= 0:
+          KL(p||q) = p*log(p/q) + (1-p)*log((1-p)/(1-q))
+          Normalisasi / latent_dim agar skala konsisten dengan KL lainnya.
         """
         eps = 1e-7
-        q_p = torch.clamp(q_c_prior, min=eps)
-        q_c = torch.clamp(c_concept, min=eps)
-        # Re-normalisasi: pastikan q_p + q_c = 1 per dimensi
-        total = q_p + q_c
-        q_p   = q_p / total
-        q_c   = q_c / total
-        kl    = torch.sum(q_p * torch.log(q_p / q_c), dim=1)
-        # Normalisasi per dimensi agar magnitude setara dengan komponen lain
-        latent_dim = q_p.shape[1]
-        return kl.mean() / latent_dim
+        p   = torch.clamp(q_c_prior, min=eps, max=1.0 - eps)
+        q   = torch.clamp(c_concept, min=eps, max=1.0 - eps)
+        kl  = p * torch.log(p / q) + (1.0 - p) * torch.log((1.0 - p) / (1.0 - q))
+        latent_dim = p.shape[1]
+        return kl.sum(dim=1).mean() / latent_dim
 
 
 # Alias untuk kompatibilitas pemanggilan di seluruh kode
@@ -1106,8 +1122,9 @@ def encode_with_embedding(model: VAEEmbeddingModel,
     """
     Encode integer index → embedding numpy array menggunakan VAE encoder.
 
-    Saat inference (eval mode), model.encode() mengembalikan z_fused = mu + c_concept
-    secara deterministik — tanpa sampling dan tanpa Gumbel noise.
+    Saat inference (eval mode), model.encode() mengembalikan
+    z_fused = cat([mu, c_concept]) secara deterministik — tanpa sampling
+    dan tanpa Gumbel noise. Output shape: [N, fused_dim] = [N, 2*latent_dim].
     PT-VAE: representasi stabil untuk downstream task (diffusion).
     """
     model.eval()
@@ -1141,8 +1158,8 @@ def decode_cat_from_embedding(model: VAEEmbeddingModel,
     Input emb_array berisi vektor laten z (atau mu saat inference).
     PT-VAE Main Decoder memetakan z_fused → embedding space → per-kolom logits.
 
-    emb_array : [N, latent_dim]  (= [N, total_emb_dim] karena latent_dim default)
-    Return    : [N, n_cols]      — predicted integer index
+    emb_array : [N, fused_dim]  (= [N, 2*latent_dim] setelah FIX concatenation)
+    Return    : [N, n_cols]     — predicted integer index
     """
     model.eval()
     emb_tensor = torch.tensor(emb_array, dtype=torch.float32, device=device)
@@ -1244,7 +1261,7 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
     - Main Encoder: input embedding → MLP → (mu, log_var, T_concept)
     - Prior Concept Encoder: input embedding → MLP → T_prior
     - Gumbel-Softmax: (T_concept, T_prior) → c_concept, q_c_prior (Eq. 3 & 4)
-    - z = mu + sigma*eps; z_fused = z + c_concept
+    - z = mu + sigma*eps; z_fused = cat([z, c_concept])  [FIX: concat bukan +]
     - Main Decoder: z_fused → MLP → per-kolom logits
     - Prior Concept Decoder: c_concept → MLP → per-kolom logits (L_recon)
     - Loss: L_ELBO + L_recon + L_KL + Classification (Eq. 14)
@@ -1263,8 +1280,8 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
 
     Return
     ------
-    train_X           : [N_train, total_emb_dim]           float32
-    test_X            : [N_test,  total_emb_dim]           float32
+    train_X           : [N_train, fused_dim]                float32  (fused_dim = 2*latent_dim)
+    test_X            : [N_test,  fused_dim]                float32
     ori_train_mask    : mask asli train [N_train, total_cols]
     ori_test_mask     : mask asli test  [N_test,  total_cols]
     train_num         : [N_train, n_num_cols]  — float asli (ternormalisasi)
@@ -1456,16 +1473,17 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
     print('[PT-VAE Embedding] Training selesai. Parameter di-freeze untuk diffusion.')
     print(f'[PT-VAE Embedding] Waktu komputasi embedding: {t_emb:.4f}s')
 
-    # ── Encode semua kolom → embedding vector (z = mu, deterministik) ────
+    # ── Encode semua kolom → embedding vector (z_fused, deterministik) ────
     train_all_emb = encode_with_embedding(emb_model, train_all_idx, device)
     test_all_emb  = encode_with_embedding(emb_model, test_all_idx,  device)
-    # shape: [N, total_emb_dim]  (= latent_dim karena latent_dim=total_emb_dim)
+    # [FIX paper] encode() output shape: [N, fused_dim] = [N, 2 * latent_dim]
+    # karena z_fused = cat([mu, c_concept]) masing-masing [N, latent_dim]
 
-    # ── train_X / test_X sekarang HANYA embedding VAE ────────────────────
+    # ── train_X / test_X sekarang HANYA embedding PT-VAE ─────────────────
     train_X = train_all_emb
     test_X  = test_all_emb
 
-    # ── Buat extended mask (TIDAK BERUBAH) ───────────────────────────────
+    # ── Buat extended mask ────────────────────────────────────────────────
     train_num_mask = train_mask[:, num_col_idx].astype(bool) if n_num_cols > 0 else np.zeros((len(train_df), 0), dtype=bool)
     train_cat_mask = train_mask[:, cat_col_idx].astype(bool) if len(cat_col_idx) > 0 else np.zeros((len(train_df), 0), dtype=bool)
     test_num_mask  = test_mask[:, num_col_idx].astype(bool)  if n_num_cols > 0 else np.zeros((len(test_df),  0), dtype=bool)
@@ -1481,24 +1499,21 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         train_all_mask = train_cat_mask
         test_all_mask  = test_cat_mask
 
-    emb_sizes_arr = np.array(emb_sizes, dtype=int)
+    # [FIX paper] encode() output = [N, fused_dim] = [N, 2 * latent_dim].
+    # Mask harus diperluas ke fused_dim, bukan total_emb_dim / sum(emb_sizes).
+    # Sample di-mark missing jika ANY kolomnya missing (same as DAE version).
+    fused_dim = emb_model.fused_dim  # 2 * latent_dim
 
-    def extend_mask_emb(mask: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+    def extend_mask_to_fused(mask_cols: np.ndarray, n_fused: int) -> np.ndarray:
         """
-        Perluas mask [N, n_cols] → [N, total_emb_dim].
-        Kolom ke-j diperluas ke sizes[j] dimensi.
-        [TIDAK BERUBAH]
+        Perluas mask [N, n_cols] → [N, fused_dim].
+        Sample di-mark missing jika ANY kolomnya missing.
         """
-        N      = mask.shape[0]
-        cum    = np.concatenate(([0], sizes.cumsum()))
-        result = np.zeros((N, sizes.sum()), dtype=bool)
-        for j in range(len(sizes)):
-            col_mask = mask[:, j][:, np.newaxis]
-            result[:, cum[j]:cum[j + 1]] = np.tile(col_mask, sizes[j])
-        return result
+        any_missing = mask_cols.any(axis=1, keepdims=True)  # [N, 1]
+        return np.tile(any_missing, (1, n_fused))            # [N, fused_dim]
 
-    extend_train_mask = extend_mask_emb(train_all_mask, emb_sizes_arr)
-    extend_test_mask  = extend_mask_emb(test_all_mask,  emb_sizes_arr)
+    extend_train_mask = extend_mask_to_fused(train_all_mask, fused_dim)
+    extend_test_mask  = extend_mask_to_fused(test_all_mask,  fused_dim)
 
     return (train_X, test_X,
             train_mask, test_mask,
