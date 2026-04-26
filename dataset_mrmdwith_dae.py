@@ -1165,9 +1165,7 @@ def decode_num_from_embedding(model: DAEEmbeddingModel,
 
             batch_num_preds = []
             for col in range(n_num_cols):
-                logits  = recon_logits[col]                          # [B, n_bins_col + 1]  (includes mask token)
-                n_bins  = len(bin_midpoints[col])                    # real bins (without mask token)
-                logits  = logits[:, :n_bins]                         # drop mask-token logit → [B, n_bins_col]
+                logits  = recon_logits[col]                          # [B, n_bins_col]
                 probs   = torch.softmax(logits, dim=1)               # [B, n_bins_col]
                 mids_t  = torch.tensor(
                     bin_midpoints[col], dtype=torch.float32, device=device
@@ -1373,88 +1371,25 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
     # ── Dimensi embedding ─────────────────────────────────────────────────
     # Numerik: n_bins per kolom; kategorikal: n_unique per kolom
     all_dims = (mrmd.n_bins_ if mrmd is not None else []) + cat_dims_cat
+    emb_sizes = [compute_embedding_size(n) for n in all_dims]
 
-    # ── [FIX] Mask missing SEBELUM embedding ─────────────────────────────
-    #
-    # Masalah lama: train_all_idx dikirim ke DAE apa adanya (nilai asli
-    # termasuk kolom yang missing) → DAE "melihat" nilai yang seharusnya
-    # tidak diketahui → laten mengandung informasi bocor → diffusion tidak
-    # benar-benar belajar mengisi missing values.
-    #
-    # Solusi: sebelum masuk DAE, posisi missing diganti dengan MASK TOKEN
-    # khusus = n_vocab (di luar range [0, n_vocab-1]) per kolom.
-    # Dengan demikian DAE dilatih mengenali token ini sebagai "tidak diketahui"
-    # dan menghasilkan laten yang mencerminkan kondisi missing sesungguhnya.
-    #
-    # Konsekuensi: vocab size tiap kolom bertambah 1 (all_dims_with_mask),
-    # sehingga W_enc dan W_dec DAE berukuran sesuai vocab baru.
-    # train_all_idx (vocab asli) tetap disimpan untuk evaluasi get_eval.
-
-    # Buat mask per kolom di level all_idx (urutan: num dulu, lalu cat)
-    if n_num_cols > 0 and len(cat_col_idx) > 0:
-        train_all_mask_cols = np.concatenate([
-            train_mask[:, num_col_idx],
-            train_mask[:, cat_col_idx]
-        ], axis=1).astype(bool)
-        test_all_mask_cols = np.concatenate([
-            test_mask[:, num_col_idx],
-            test_mask[:, cat_col_idx]
-        ], axis=1).astype(bool)
-    elif n_num_cols > 0:
-        train_all_mask_cols = train_mask[:, num_col_idx].astype(bool)
-        test_all_mask_cols  = test_mask[:, num_col_idx].astype(bool)
-    else:
-        train_all_mask_cols = train_mask[:, cat_col_idx].astype(bool)
-        test_all_mask_cols  = test_mask[:, cat_col_idx].astype(bool)
-
-    def apply_missing_mask_to_idx(all_idx: np.ndarray,
-                                  mask_cols: np.ndarray,
-                                  dims: list) -> np.ndarray:
-        """
-        Ganti posisi missing dengan MASK TOKEN = n_vocab kolom tersebut.
-
-        Token ini berada di luar range valid [0, n_vocab-1] sehingga DAE
-        mendapat sinyal eksplisit "kolom ini tidak diketahui".
-
-        all_idx   : [N, n_cols] -- integer index asli
-        mask_cols : [N, n_cols] -- bool, True = missing
-        dims      : list[n_cols] -- vocab size asli per kolom
-
-        Return    : [N, n_cols] -- index dengan missing diganti mask_token
-        """
-        idx_masked = all_idx.copy()
-        for j, n_vocab in enumerate(dims):
-            missing_rows = mask_cols[:, j]
-            idx_masked[missing_rows, j] = n_vocab  # token di luar vocab
-        return idx_masked
-
-    train_all_idx_masked = apply_missing_mask_to_idx(
-        train_all_idx, train_all_mask_cols, all_dims)
-    test_all_idx_masked  = apply_missing_mask_to_idx(
-        test_all_idx,  test_all_mask_cols,  all_dims)
-
-    # Vocab size dengan mask token (+1 per kolom)
-    all_dims_with_mask = [d + 1 for d in all_dims]
-    emb_sizes = [compute_embedding_size(n) for n in all_dims_with_mask]
-
-    print(f'[Embedding] all_dims asli (num_bin+cat)      = {all_dims}')
-    print(f'[Embedding] all_dims+mask_token (+1 per col) = {all_dims_with_mask}')
+    print(f'[Embedding] all_dims (num_bin+cat)={all_dims}')
     print(f'[Embedding] emb_sizes={emb_sizes}, total_emb_dim={sum(emb_sizes)}')
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # ── Latih DAEEmbeddingModel ───────────────────────────────────────────
-    # [FIX] Input: train_all_idx_masked -- posisi missing sudah diganti mask token
-    # DAE dilatih untuk mengenali token missing dan menghasilkan laten yang
-    # mencerminkan kondisi missing sesungguhnya (bukan data lengkap).
+    # Input: semua kolom (numerik bin + kategorikal) sebagai integer index
+    # Objective: unsupervised denoising (TIDAK ada classifier loss)
+    # Sesuai Vincent et al. (2008): min E[L(x, g(f(x_tilde)))]
     print('[DAE] Melatih DAEEmbeddingModel '
-          '(input sudah di-mask sebelum embedding) ...')
+          '(denoising reconstruction loss, unsupervised) ...')
     t_emb_start = time.time()
     print(noise_std)
     emb_model = train_supervised_embedding_model(
-        cat_idx_array = train_all_idx_masked,   # [FIX] pakai yang sudah di-mask
+        cat_idx_array = train_all_idx,
         labels        = train_labels,
-        cat_dims      = all_dims_with_mask,     # [FIX] vocab +1 untuk mask token
+        cat_dims      = all_dims,
         emb_sizes     = emb_sizes,
         n_classes     = n_classes,
         device        = device,
@@ -1474,11 +1409,10 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
     print(f'[Embedding] Waktu komputasi embedding: {t_emb:.4f}s')
 
     # ── Encode semua kolom → embedding vector ────────────────────────────
-    # [FIX] Encode pakai idx yang sudah di-mask agar laten mencerminkan
-    # kondisi missing yang sesungguhnya (bukan data lengkap).
-    train_all_emb = encode_with_embedding(emb_model, train_all_idx_masked, device)
-    test_all_emb  = encode_with_embedding(emb_model, test_all_idx_masked,  device)
-    # shape: [N, hidden_dim=256]
+    # [TIDAK BERUBAH] — encode_with_embedding sama persis
+    train_all_emb = encode_with_embedding(emb_model, train_all_idx, device)
+    test_all_emb  = encode_with_embedding(emb_model, test_all_idx,  device)
+    # shape: [N, total_emb_dim]
 
     # ── train_X / test_X sekarang HANYA embedding (tidak ada kolom raw num) ─
     # Karena numerik sudah masuk embedding, len_num = 0 di main
@@ -1504,18 +1438,38 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         train_all_mask = train_cat_mask
         test_all_mask  = test_cat_mask
 
+    emb_sizes_arr = np.array(emb_sizes, dtype=int)
+
+    def extend_mask_emb(mask: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+        """
+        Perluas mask [N, n_cols] → [N, total_emb_dim].
+        Kolom ke-j diperluas ke sizes[j] dimensi.
+        [TIDAK BERUBAH]
+        """
+        N      = mask.shape[0]
+        cum    = np.concatenate(([0], sizes.cumsum()))
+        result = np.zeros((N, sizes.sum()), dtype=bool)
+        for j in range(len(sizes)):
+            col_mask = mask[:, j][:, np.newaxis]
+            result[:, cum[j]:cum[j + 1]] = np.tile(col_mask, sizes[j])
+        return result
+
+    # extend_train_mask = extend_mask_emb(train_all_mask, emb_sizes_arr)
+    # extend_test_mask  = extend_mask_emb(test_all_mask,  emb_sizes_arr)
+    # train_X / test_X adalah output laten DAE [N, hidden_dim=256]
+    # Mask harus diperluas ke hidden_dim, bukan sum(emb_sizes)
     hidden_dim = train_X.shape[1]  # ambil dari train_X langsung
 
-    # [FIX] Setelah mask diterapkan sebelum embedding, laten sudah mencerminkan
-    # kondisi missing sesungguhnya. extend_mask ke hidden_dim menggunakan
-    # any(axis=1): sample yang punya kolom missing -> seluruh embedding-nya
-    # dianggap "tidak reliable" untuk mean_std dan X_miss di diffusion.
-    # Ini logis karena hidden_dim adalah ruang laten bersama (bukan per-kolom).
-    # train_all_mask_cols sudah dibuat di atas saat apply_missing_mask_to_idx.
-    any_train_missing = train_all_mask_cols.any(axis=1, keepdims=True)  # [N, 1]
-    any_test_missing  = test_all_mask_cols.any(axis=1,  keepdims=True)  # [N, 1]
-    extend_train_mask = np.tile(any_train_missing, (1, hidden_dim))     # [N, hidden_dim]
-    extend_test_mask  = np.tile(any_test_missing,  (1, hidden_dim))     # [N, hidden_dim]
+    def extend_mask_to_hidden(mask_cols: np.ndarray, n_hidden: int) -> np.ndarray:
+        """
+        Dari mask [N, n_cols] → [N, n_hidden].
+        Sample di-mark missing jika ANY kolomnya missing.
+        """
+        any_missing = mask_cols.any(axis=1, keepdims=True)  # [N, 1]
+        return np.tile(any_missing, (1, n_hidden))           # [N, hidden_dim]
+
+    extend_train_mask = extend_mask_to_hidden(train_all_mask, hidden_dim)
+    extend_test_mask  = extend_mask_to_hidden(test_all_mask,  hidden_dim)
 
     # Hitung bin_midpoints dalam skala normalisasi (dibutuhkan get_eval)
     # Sudah dihitung di atas, disimpan di mrmd.bin_midpoints_ & bin_midpoints
