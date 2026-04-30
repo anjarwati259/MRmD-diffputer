@@ -25,7 +25,7 @@ parser.add_argument('--max_iter',   type=int, default=6,            help='Maximu
 parser.add_argument('--ratio',      type=str, default=30,           help='Masking ratio.')
 parser.add_argument('--hid_dim',    type=int, default=1024,         help='Hidden dimension.')
 parser.add_argument('--mask',       type=str, default='MCAR',       help='Masking mechanism.')
-parser.add_argument('--num_trials', type=int, default=20,            help='Number of sampling times.')
+parser.add_argument('--num_trials', type=int, default=10,            help='Number of sampling times.')
 parser.add_argument('--num_steps',  type=int, default=50,           help='Number of diffusion steps.')
 parser.add_argument('--noise_std',  type=float, default=0.01,       help='Noise std for embedding model.')
 parser.add_argument('--epochs',     type=int, default=10000,        help='Number of training epochs per iteration.')
@@ -418,7 +418,7 @@ if __name__ == '__main__':
         print(f'  - Out-of-sample Imputation     : {t_impute_out:.4f}s')
         print(f'  - TOTAL (Diskrit→Imputasi)     : {t_total_pipeline:.4f}s')
 
-        with open(f'{result_save_path}/result_mrmdwith.txt', 'a+', encoding='utf-8') as f:
+        with open(f'{result_save_path}/result_mrmdwithalpha1.txt', 'a+', encoding='utf-8') as f:
             f.write(
                 f'iteration {iteration}, '
                 f'MAE: in-sample={mae:.6f}, out-of-sample={mae_out:.6f}\n'

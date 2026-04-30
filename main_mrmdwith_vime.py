@@ -23,7 +23,7 @@ parser.add_argument('--dataname',   type=str, default='california', help='Name o
 parser.add_argument('--gpu',        type=int, default=0,            help='GPU index.')
 parser.add_argument('--split_idx',  type=int, default=0,            help='Split idx.')
 parser.add_argument('--max_iter',   type=int, default=6,            help='Maximum iteration.')
-parser.add_argument('--ratio',      type=str, default=30,           help='Masking ratio.')
+parser.add_argument('--ratio',      type=str, default=10,           help='Masking ratio.')
 parser.add_argument('--hid_dim',    type=int, default=1024,         help='Hidden dimension.')
 parser.add_argument('--mask',       type=str, default='MCAR',       help='Masking mechanism.')
 parser.add_argument('--num_trials', type=int, default=20,            help='Number of sampling times.')
