@@ -61,14 +61,15 @@ if __name__ == '__main__':
     #  Load Dataset
     #  PENTING: load_dataset dipanggil SEBELUM torch.set_default_device.
     #
-    #  [MODIFIKASI] load_dataset sekarang mengembalikan 3 nilai tambahan:
+    #  load_dataset mengembalikan nilai tambahan:
     #    - mrmd          : MRmDDiscretizer (untuk decode numerik)
     #    - bin_midpoints : list[n_num_cols] — midpoint bin skala normalisasi
     #    - n_num_cols    : int — jumlah kolom numerik
     #
     #  train_X / test_X : [N, total_emb_dim]
-    #    SEMUA fitur (numerik bin + kategorikal) sudah di-encode ke embedding.
-    #    len_num = 0 karena tidak ada kolom raw numerik terpisah.
+    #    SEMUA fitur (numerik bin + kategorikal) sudah di-encode ke embedding
+    #    PT-VAE. z_fused = mu + c_concept (addition, sesuai paper Fig.1 Eq.5).
+    #    total_emb_dim = sum(emb_sizes) = latent_dim — ruang diffusion.
     # =========================================================================
     (train_X, test_X,
      ori_train_mask, ori_test_mask,
@@ -103,11 +104,10 @@ if __name__ == '__main__':
 
     # =========================================================================
     #  Normalisasi
-    #  [TIDAK BERUBAH] — mean & std dihitung pada observed entries,
-    #  normalisasi: (X - mean) / std / 2
+    #  mean & std dihitung pada observed entries, normalisasi: (X - mean)/std/2
     #
-    #  Catatan: train_X sekarang hanya berisi embedding (tidak ada raw numerik).
-    #  extend_train_mask shape sudah cocok dengan train_X (total_emb_dim).
+    #  train_X shape: [N, total_emb_dim] — embedding PT-VAE (z_fused = mu + c_concept)
+    #  extend_train_mask shape: [N, total_emb_dim] — mask per dimensi embedding
     # =========================================================================
     mean_X, std_X = mean_std(train_X, extend_train_mask)
     std_X[std_X == 0] = 1.0
@@ -289,17 +289,14 @@ if __name__ == '__main__':
         # =====================================================================
         #  Denormalisasi In-sample
         #
-        #  [MODIFIKASI] Semua dimensi adalah embedding (tidak ada raw numerik).
-        #  Seluruh dimensi di-denorm ke skala embedding asli untuk decoding.
-        #
+        #  Semua dimensi adalah embedding PT-VAE (z_fused ruang total_emb_dim).
         #  Alur:
         #    rec_X (skala /2) → * 2 → skala (X-mean)/std
-        #    → * std + mean   → skala embedding asli
-        #    → decode_num_from_embedding → MAE/RMSE di skala normalisasi
-        #    → decode_cat_from_embedding → Accuracy kategorikal
-        #
-        #  MAE/RMSE dihitung di skala (X-mean)/std VIA bin midpoints,
-        #  konsisten dengan konvensi asli DiffPutter (tidak di-denorm ke asli).
+        #    → * std + mean   → skala embedding asli (total_emb_dim)
+        #    → decode_num_from_embedding:
+        #        split per emb_sizes → softmax → weighted sum midpoints → MAE/RMSE
+        #    → decode_cat_from_embedding:
+        #        split per emb_sizes → argmax logits → Accuracy kategorikal
         # =====================================================================
 
         rec_X_np  = rec_X.cpu().numpy()
