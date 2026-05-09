@@ -25,7 +25,7 @@ parser.add_argument('--max_iter',   type=int, default=6,            help='Maximu
 parser.add_argument('--ratio',      type=str, default=30,           help='Masking ratio.')
 parser.add_argument('--hid_dim',    type=int, default=1024,         help='Hidden dimension.')
 parser.add_argument('--mask',       type=str, default='MCAR',       help='Masking mechanism.')
-parser.add_argument('--num_trials', type=int, default=20,            help='Number of sampling times.')
+parser.add_argument('--num_trials', type=int, default=10,            help='Number of sampling times.')
 parser.add_argument('--num_steps',  type=int, default=50,           help='Number of diffusion steps.')
 parser.add_argument('--noise_std',  type=float, default=0.01,       help='Noise std for embedding model.')
 parser.add_argument('--epochs',     type=int, default=10000,        help='Number of training epochs per iteration.')
@@ -199,7 +199,7 @@ if __name__ == '__main__':
 
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=0)
         scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.9,
-                                      patience=50, verbose=False)
+                                      patience=50)
 
         model.train()
         best_loss = float('inf')
