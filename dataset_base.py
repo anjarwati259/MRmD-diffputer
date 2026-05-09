@@ -163,6 +163,7 @@ def mean_std(data, mask):
     mean = (data * mask).sum(0) / mask_sum
     var = ((data - mean) ** 2 * mask).sum(0) / mask_sum
     std = np.sqrt(var)
+    std[std == 0] = 1  # hindari divide by zero jika kolom konstan
     return mean, std
 
 

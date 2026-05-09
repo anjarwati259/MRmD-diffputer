@@ -1,0 +1,20 @@
+{
+    "name": "stroke",
+    "num_col_idx": [
+        1,
+        7,
+        8
+    ],
+    "cat_col_idx": [
+        0,
+        2,
+        3,
+        4,
+        5,
+        6,
+        9
+    ],
+    "target_col_idx": [
+        10
+    ]
+}

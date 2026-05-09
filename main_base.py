@@ -26,6 +26,7 @@ parser.add_argument('--hid_dim', type=int, default=1024, help='Hidden dimension.
 parser.add_argument('--mask', type=str, default='MCAR', help='Masking machenisms.')
 parser.add_argument('--num_trials', type=int, default=10, help='Number of sampling times.')
 parser.add_argument('--num_steps', type=int, default=50, help='Number of diffusion steps.')
+parser.add_argument('--reset', action='store_true', help='Hapus checkpoint lama sebelum training.')
 
 args = parser.parse_args()
 
@@ -53,6 +54,14 @@ if __name__ == '__main__':
 
     if mask_type == 'MNAR':
         mask_type = 'MNAR_logistic_T2'
+
+    # Hapus checkpoint lama jika --reset dipakai
+    if args.reset:
+        import shutil
+        reset_path = f'ckpt/{dataname}/rate{ratio}/{mask_type}/{split_idx}/{num_trials}_{num_steps}'
+        if os.path.exists(reset_path):
+            shutil.rmtree(reset_path)
+            print(f'[reset] Checkpoint lama dihapus: {reset_path}')
 
     train_X, test_X, ori_train_mask, ori_test_mask, train_num, test_num, train_cat_idx, test_cat_idx, train_mask, test_mask, cat_bin_num = load_dataset(dataname, split_idx, mask_type, ratio)
     
