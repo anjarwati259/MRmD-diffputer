@@ -418,7 +418,7 @@ if __name__ == '__main__':
         print(f'  - Out-of-sample Imputation     : {t_impute_out:.4f}s')
         print(f'  - TOTAL (Diskrit→Imputasi)     : {t_total_pipeline:.4f}s')
 
-        with open(f'{result_save_path}/result_mrmdwithalpha1.txt', 'a+', encoding='utf-8') as f:
+        with open(f'{result_save_path}/result_mrmdwith.txt', 'a+', encoding='utf-8') as f:
             f.write(
                 f'iteration {iteration}, '
                 f'MAE: in-sample={mae:.6f}, out-of-sample={mae_out:.6f}\n'

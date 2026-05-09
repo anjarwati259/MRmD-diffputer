@@ -7,6 +7,7 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import os
 import json
 import time
+import pickle
 
 # MRmD helper functions (inline dari mrmd_discretizer.py)
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -459,6 +460,12 @@ def train_supervised_embedding_model(cat_idx_array: np.ndarray,
     [TIDAK BERUBAH] — sama persis dengan versi sebelumnya.
     Sekarang cat_idx_array berisi SEMUA kolom (numerik bin + kategorikal).
     """
+    # Fix random seed agar hasil embedding reproducible setiap run
+    torch.manual_seed(42)
+    np.random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+
     model = SupervisedLearnableEmbeddingModel(
         cat_dims, emb_sizes, n_classes,
         dropout=dropout,
@@ -809,26 +816,42 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         train_num = train_num_norm.astype(np.float32)
         test_num  = test_num_norm.astype(np.float32)
 
-        # ── MRmD Discretization ─────────────────────────────────────────
-        print(f'[MRmD] Menjalankan MRmD discretization pada {n_num_cols} kolom numerik ...')
-        mrmd = MRmDDiscretizer(val_size=0.125, N_D=50, random_state=42, verbose=False)
+        # ── MRmD Discretization (dengan cache) ──────────────────────────
+        mrmd_cache_path = f'cache/{dataname}/mrmd.pkl'
+        os.makedirs(f'cache/{dataname}', exist_ok=True)
 
-        # Fit MRmD pada data RAW train (bukan normalisasi) dengan label
-        t_mrmd_start = time.time()
-        mrmd.fit(train_num_raw, train_labels)
+        if os.path.exists(mrmd_cache_path):
+            # Load cut points dari cache, skip fitting
+            print(f'[MRmD] Cache ditemukan di {mrmd_cache_path}, skip fitting.')
+            with open(mrmd_cache_path, 'rb') as f:
+                mrmd = pickle.load(f)
+            t_mrmd = 0.0
+            print(f'[MRmD] Cut points di-load. n_bins per kolom: {mrmd.n_bins_}')
+        else:
+            # Fit MRmD pada data RAW train (bukan normalisasi) dengan label
+            print(f'[MRmD] Cache belum ada. Menjalankan MRmD discretization '
+                  f'pada {n_num_cols} kolom numerik ...')
+            t_mrmd_start = time.time()
+            mrmd = MRmDDiscretizer(val_size=0.125, N_D=50, random_state=42, verbose=False)
+            mrmd.fit(train_num_raw, train_labels)
+            t_mrmd = time.time() - t_mrmd_start
 
+            # Simpan objek mrmd (berisi cut_points_, x_min_, x_max_, n_bins_)
+            with open(mrmd_cache_path, 'wb') as f:
+                pickle.dump(mrmd, f)
+            print(f'[MRmD] Cache disimpan ke {mrmd_cache_path}')
+            print(f'[MRmD] Waktu komputasi diskritisasi: {t_mrmd:.4f}s')
+
+        # Transform train & test pakai cut points yang sama (fit atau cache)
         train_num_bin = mrmd.transform(train_num_raw)   # [N_train, n_num_cols] int64
         test_num_bin  = mrmd.transform(test_num_raw)    # [N_test,  n_num_cols] int64
 
         # Hitung bin midpoints dalam skala NORMALISASI
         # (dipakai saat decoding: bin index → nilai kontinu untuk MAE/RMSE)
         bin_midpoints = mrmd.get_bin_midpoints(train_num_norm, train_num_bin)
-        t_mrmd_end = time.time()
-        t_mrmd = t_mrmd_end - t_mrmd_start
 
         print(f'[MRmD] n_bins per kolom: {mrmd.n_bins_}')
         print(f'[MRmD] Total bins: {sum(mrmd.n_bins_)}')
-        print(f'[MRmD] Waktu komputasi diskritisasi: {t_mrmd:.4f}s')
 
     else:
         # Tidak ada fitur numerik

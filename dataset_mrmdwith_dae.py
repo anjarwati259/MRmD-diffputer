@@ -404,7 +404,8 @@ class DAEEmbeddingModel(nn.Module):
         lapisan affine + sigmoid:
             z = g_θ'(y) = sigmoid(W'y + b')
         W' ∈ R^{d × d'},  b' ∈ R^{d}.
-        Dari z kemudian diambil slice per kolom → logits rekonstruksi.
+        z adalah vektor Bernoulli params per elemen one-hot gabungan.
+        Dari z kemudian diambil slice per kolom → output rekonstruksi.
         (Paper Section 2.2: "z = g_θ'(y) = s(W'y + b')")
 
       Tied weights (opsional, Section 2.2):
@@ -557,8 +558,11 @@ class DAEEmbeddingModel(nn.Module):
         return : [batch, hidden_dim]   — representasi laten y
         """
         x_oh = self._to_onehot(x_cat)           # x ∈ {0,1}^d
-        x_oh = self.dropout(x_oh)
-        y    = torch.sigmoid(self.W_enc(x_oh))  # y = sigmoid(Wx + b)
+        # TIDAK ada dropout di sini — encode() adalah inference path bersih.
+        # Paper Vincent et al. (2008) tidak menyebut dropout sama sekali.
+        # Satu-satunya noise yang dipakai paper adalah corruption qD (Section 2.3),
+        # dan itu HANYA aktif saat training, bukan di encode() inference.
+        y    = torch.sigmoid(self.W_enc(x_oh))  # y = sigmoid(Wx + b), eq. 1
         return y                                  # [batch, hidden_dim]
 
     def decode(self, y: torch.Tensor) -> list:
@@ -570,38 +574,37 @@ class DAEEmbeddingModel(nn.Module):
         Untuk fitur multi-class (one-hot per kolom), setiap kolom harus
         diperlakukan sebagai distribusi kategoris — bukan biner independen.
 
-        Arsitektur decoder mengikuti paper (Section 2.2):
-            z_raw = W'y + b'   ← affine projection (RAW, tanpa aktivasi)
-        Kemudian z_raw di-slice per kolom:
-            logits_j = z_raw[:, offset_j : offset_j + vocab_j]  [batch, vocab_j]
+        Arsitektur decoder mengikuti paper (Section 2.2) secara ketat:
+            z = s(W'y + b')   ← sigmoid sesuai eq. 1
+        Kemudian z di-slice per kolom:
+            z_j = z[:, offset_j : offset_j + vocab_j]  [batch, vocab_j]
 
-        CrossEntropyLoss (dipakai di training) sudah mengandung softmax internal,
-        sehingga TIDAK perlu sigmoid/softmax di sini.
+        z_j adalah vektor probabilitas Bernoulli per elemen one-hot. Loss L_H (eq. 2)
+        memperlakukan setiap elemen one-hot secara independen sebagai Bernoulli,
+        sehingga sigmoid adalah aktivasi yang benar (bukan softmax/raw logits).
 
-        Untuk argmax (prediksi kelas): argmax(logits_j) — benar karena
-            argmax(softmax(logits)) = argmax(logits)
-
-        Untuk decode numerik (weighted-sum): softmax(logits_j) @ midpoints — benar.
-
-        Catatan: tied_weights (W' = W^T) tetap didukung, namun tanpa sigmoid.
+        Catatan: tied_weights (W' = W^T) tetap didukung dengan sigmoid.
 
         y      : [batch, hidden_dim]
-        return : list[n_cols] of [batch, vocab_size_i]  — RAW logits
+        return : list[n_cols] of [batch, vocab_size_i]  — sigmoid output (Bernoulli prob)
         """
         if self.tied_weights:
-            # W' = W^T  (tied weights, Section 2.2) — tanpa sigmoid
-            z_raw = torch.nn.functional.linear(y, self.W_enc.weight.t(), self.b_dec)
+            # W' = W^T  (tied weights, Section 2.2)
+            z_affine = torch.nn.functional.linear(y, self.W_enc.weight.t(), self.b_dec)
         else:
-            z_raw = self.W_dec(y)  # [batch, total_onehot] — RAW logits
+            z_affine = self.W_dec(y)  # [batch, total_onehot] — affine projection
 
-        # Slice per kolom → logits rekonstruksi (RAW, tanpa aktivasi)
-        logits_per_col = []
+        # z = sigmoid(W'y + b') sesuai paper eq. 1: z = g_θ'(y) = s(W'y + b')
+        z = torch.sigmoid(z_affine)  # [batch, total_onehot] — Bernoulli params
+
+        # Slice per kolom → output Bernoulli per kolom
+        z_per_col = []
         for i, n_cat in enumerate(self.cat_dims):
             start = self._col_offsets[i]
             end   = start + n_cat
-            logits_per_col.append(z_raw[:, start:end])   # [batch, vocab_size_i]
+            z_per_col.append(z[:, start:end])   # [batch, vocab_size_i]
 
-        return logits_per_col
+        return z_per_col
 
     def forward(self, x_cat: torch.Tensor,
                 add_noise: bool = False):
@@ -630,22 +633,22 @@ class DAEEmbeddingModel(nn.Module):
         ------
         y            : [batch, hidden_dim]      — latent representation
         class_logits : None                     — placeholder (tidak ada classifier)
-        recon_logits : list[n_cols] of Tensor   — logits rekonstruksi tiap kolom
+        recon_z      : list[n_cols] of Tensor   — sigmoid output rekonstruksi tiap kolom
         """
         if self.training and self.corruption_prob > 0:
             # Corruption HANYA saat training — mencegah identity mapping
-            # Dilakukan di ruang one-hot, sesuai Section 2.3 paper
+            # Dilakukan di ruang one-hot, sesuai Section 2.3 paper.
+            # Paper TIDAK menggunakan dropout — satu-satunya regularisasi adalah qD.
             x_oh    = self._to_onehot(x_cat)
-            x_input = self._corrupt_onehot(x_oh)
-            x_input = self.dropout(x_input)
-            y       = torch.sigmoid(self.W_enc(x_input))   # f_θ(x̃)
+            x_input = self._corrupt_onehot(x_oh)     # x̃ ~ qD(x̃|x)
+            y       = torch.sigmoid(self.W_enc(x_input))   # f_θ(x̃), eq. 1
         else:
             # Inference: encode langsung dari x_clean (tanpa corrupt)
             y = self.encode(x_cat)
 
-        recon_logits = self.decode(y)   # g_θ'(y)
+        recon_z = self.decode(y)   # g_θ'(y) → list[n_cols] sigmoid output
 
-        return y, None, recon_logits
+        return y, None, recon_z
 
 
 # ===========================================================================
@@ -709,18 +712,21 @@ def train_dae_embedding_model(cat_idx_array: np.ndarray,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    # Loss L_H: cross-entropy rekonstruksi per kolom (eq. 2 & 5 paper)
+    # Loss L_H: binary cross-entropy per elemen one-hot (eq. 2 Vincent et al. 2008)
     #
-    # PERBAIKAN: Gunakan CrossEntropyLoss per kolom, BUKAN sigmoid + BCELoss.
+    # Paper mendefinisikan (eq. 2):
+    #   L_H(x, z) = H(B_x || B_z)
+    #             = -Σ_k [ x_k log z_k + (1 - x_k) log(1 - z_k) ]
     #
-    # Setiap kolom merepresentasikan variabel kategoris one-of-K.
-    # CrossEntropyLoss(logits [B, K], target [B]) = -log softmax(logits)[target]
-    # ini benar untuk distribusi kategoris karena mengandung softmax internal
-    # dan menjamin ΣP = 1 per kolom.
+    # x ∈ {0,1}^d adalah vektor one-hot BINER gabungan semua kolom.
+    # z ∈ [0,1]^d adalah output sigmoid decoder — Bernoulli params per elemen.
+    # Setiap elemen diperlakukan INDEPENDEN sebagai Bernoulli (bukan softmax).
+    # Oleh karena itu loss yang benar adalah BCELoss, BUKAN CrossEntropyLoss.
     #
-    # sigmoid + BCE salah karena memperlakukan tiap bit secara independen
-    # sehingga tidak ada normalisasi across vocab per kolom.
-    ce_loss = nn.CrossEntropyLoss()
+    # CrossEntropyLoss (= softmax + NLL) salah karena:
+    #   (1) mengasumsikan distribusi kategoris (ΣP=1 per kolom), bukan Bernoulli
+    #   (2) tidak konsisten dengan decoder sigmoid yang menghasilkan prob per elemen
+    bce_loss = nn.BCELoss()
 
     # Hanya butuh x_clean — tidak butuh label
     cat_tensor = torch.tensor(cat_idx_array, dtype=torch.long, device=device)
@@ -750,23 +756,26 @@ def train_dae_embedding_model(cat_idx_array: np.ndarray,
         for (batch_cat,) in loader:
             optimizer.zero_grad()
 
-            # Forward: x_clean → corrupt(x_oh) → f_θ → y → g_θ' → recon_logits
+            # Forward: x_clean → corrupt(x_oh) → f_θ → y → g_θ' → z
             # Corruption dilakukan DI DALAM model.forward() (hanya saat training)
-            y, _, recon_logits = model(batch_cat)
+            y, _, z_per_col = model(batch_cat)
 
-            # Loss sesuai eq. 2 & 5 Vincent et al. (2008) — per kolom:
-            #   CE(logits_j [B, K], target_j [B]) untuk setiap kolom j
+            # Loss L_H sesuai eq. 2 & 5 Vincent et al. (2008):
+            #   L_H(x, z) = -Σ_k [ x_k log z_k + (1 - x_k) log(1 - z_k) ]
             #
-            # PERBAIKAN: target adalah integer index (bukan one-hot float)
-            # CrossEntropyLoss menerima: logits [B, K] dan target [B] (int)
-            # Ini menggantikan: one-hot scatter + BCELoss (yang salah untuk multi-class)
+            # x adalah one-hot biner BERSIH (x_clean), z adalah sigmoid output decoder.
+            # BCELoss dihitung pada seluruh vektor one-hot gabungan [B, total_onehot].
+            # Target one-hot dibangun dari x_clean (integer index → {0,1}^d).
+            x_oh_target = model._to_onehot(batch_cat)  # [B, total_onehot] — biner bersih
+
             recon_loss = 0.0
             for i in range(model.n_cols):
-                # logits_i : [batch, vocab_size_i]  — RAW logits dari decoder
-                # target_i : [batch]                — integer class index
-                recon_loss = recon_loss + ce_loss(
-                    recon_logits[i],          # [B, K] raw logits
-                    batch_cat[:, i].long()    # [B]    integer target
+                # z_i      : [B, vocab_size_i] — sigmoid output (Bernoulli params)
+                # target_i : [B, vocab_size_i] — one-hot biner bersih
+                recon_loss = recon_loss + bce_loss(
+                    z_per_col[i],                       # [B, K] sigmoid prob
+                    x_oh_target[:, model._col_offsets[i] :
+                                    model._col_offsets[i] + model.cat_dims[i]]  # [B, K] one-hot
                 )
             recon_loss = recon_loss / model.n_cols
 
@@ -780,12 +789,13 @@ def train_dae_embedding_model(cat_idx_array: np.ndarray,
 
         if (epoch + 1) % 10 == 0:
             # Hitung reconstruction accuracy (denoising) pada batch terakhir
-            # untuk monitoring kemampuan model merekonstruksi x dari x_tilde
+            # untuk monitoring: seberapa baik model merekonstruksi x dari x_tilde.
+            # argmax(sigmoid(z)) = argmax(z) — valid karena sigmoid monoton.
             with torch.no_grad():
                 correct_total = 0
                 total_cols    = 0
                 for i in range(model.n_cols):
-                    pred_i = recon_logits[i].argmax(dim=1)   # argmax(raw_logits) = argmax(softmax)
+                    pred_i = z_per_col[i].argmax(dim=1)   # argmax(sigmoid) = argmax(affine)
                     true_i = batch_cat[:, i].long()
                     correct_total += (pred_i == true_i).sum().item()
                     total_cols    += batch_cat.shape[0]
@@ -927,7 +937,7 @@ def evaluate_dae_denoising(model: DAEEmbeddingModel,
     if corruption_levels is None:
         corruption_levels = [0.0, 0.1, 0.2, 0.3, 0.5]
 
-    ce_loss_fn = nn.CrossEntropyLoss(reduction='mean')
+    ce_loss_fn = nn.BCELoss(reduction='mean')
     cat_tensor = torch.tensor(cat_idx_array, dtype=torch.long, device=device)
     n_cols     = model.n_cols
     results    = {}
@@ -978,30 +988,36 @@ def evaluate_dae_denoising(model: DAEEmbeddingModel,
                             rand_oh.scatter_(1, rand_idx.unsqueeze(1), 1.0)
                             x_tilde_oh[col_corrupt, start_c:end_c] = rand_oh
                     # ── Step 2: Encode x_tilde → y ────────────────────────
-                    x_tilde_oh = model.dropout(x_tilde_oh)
-                    y           = torch.sigmoid(model.W_enc(x_tilde_oh))
+                    # Paper tidak menggunakan dropout — hanya corruption qD (Section 2.3)
+                    y = torch.sigmoid(model.W_enc(x_tilde_oh))   # f_θ(x̃), eq. 1
                 else:
                     # ν=0: encode langsung x_clean (tanpa corrupt)
                     y = model.encode(x_clean)
 
-                # ── Step 3: Decode y → recon_logits ───────────────────────
-                recon_logits = model.decode(y)   # list[n_cols] of [B, K_j]
+                # ── Step 3: Decode y → z (sigmoid output) ────────────────
+                z_per_col = model.decode(y)   # list[n_cols] of [B, K_j] sigmoid prob
 
-                # ── Step 4: Hitung CE loss & accuracy vs x_clean ──────────
-                batch_ce = 0.0
+                # ── Step 4: Hitung BCE loss & accuracy vs x_clean ─────────
+                # L_H(x, z) = -Σ_k [ x_k log z_k + (1-x_k) log(1-z_k) ] (eq. 2)
+                x_oh_clean = model._to_onehot(x_clean)  # [B, total_onehot] one-hot bersih
+                batch_bce  = 0.0
                 for j in range(n_cols):
-                    logits_j = recon_logits[j]              # [B, K_j] raw logits
-                    target_j = x_clean[:, j].long()         # [B] clean integer index
+                    z_j      = z_per_col[j]              # [B, K_j] sigmoid output
+                    target_j = x_oh_clean[
+                        :, model._col_offsets[j] :
+                           model._col_offsets[j] + model.cat_dims[j]
+                    ]                                    # [B, K_j] one-hot biner bersih
 
-                    # CE loss konsisten dengan training
-                    batch_ce += ce_loss_fn(logits_j, target_j).item()
+                    # BCE loss konsisten dengan training (eq. 2 paper)
+                    batch_bce += ce_loss_fn(z_j, target_j).item()
 
-                    # Accuracy: argmax(raw logits) = argmax(softmax) — benar
-                    pred_j = logits_j.argmax(dim=1)
-                    col_correct[j] += (pred_j == target_j).sum().item()
+                    # Accuracy: argmax(sigmoid) = argmax(affine) — valid karena monoton
+                    pred_j = z_j.argmax(dim=1)
+                    true_j = x_clean[:, j].long()
+                    col_correct[j] += (pred_j == true_j).sum().item()
                     col_total[j]   += x_clean.shape[0]
 
-                total_ce_loss += batch_ce / n_cols
+                total_ce_loss += batch_bce / n_cols
                 n_batches     += 1
 
         avg_ce          = total_ce_loss / n_batches
@@ -1076,15 +1092,14 @@ def decode_cat_from_embedding(model: DAEEmbeddingModel,
                               device: str,
                               batch_size: int = 4096) -> np.ndarray:
     """
-    Decode representasi laten y → prediksi kelas tiap kolom (argmax logits).
+    Decode representasi laten y → prediksi kelas tiap kolom (argmax sigmoid output).
 
     Mengimplementasikan g_θ' dari paper (Section 2.2):
-        z_raw = W'y + b'  (RAW logits, tanpa aktivasi)
+        z = sigmoid(W'y + b')  — output Bernoulli params per elemen one-hot
     kemudian argmax per slice kolom diambil sebagai prediksi kategori.
 
-    PERBAIKAN: Decoder kini mengeluarkan raw logits (bukan sigmoid output).
-    argmax(raw_logits) = argmax(softmax(logits)) — ekuivalen dan benar
-    untuk prediksi kelas kategoris.
+    argmax(sigmoid(z)) = argmax(z_affine) — valid karena sigmoid monoton naik,
+    sehingga urutan nilai tidak berubah. Prediksi kelas tetap benar.
 
     emb_array : [N, hidden_dim]  — output encode() / representasi laten y
     Return    : [N, n_cols]      — predicted integer index
@@ -1103,10 +1118,10 @@ def decode_cat_from_embedding(model: DAEEmbeddingModel,
     all_pred = []
     with torch.no_grad():
         for (batch,) in loader:
-            recon_logits = model.decode(batch)
+            recon_z  = model.decode(batch)   # list[n_cols] sigmoid output [B, K_j]
             pred_idx = torch.stack([
-                torch.argmax(logits, dim=1)
-                for logits in recon_logits
+                torch.argmax(z_j, dim=1)     # argmax(sigmoid) valid karena sigmoid monoton
+                for z_j in recon_z
             ], dim=1)
             all_pred.append(pred_idx.cpu().numpy())
 
@@ -1123,17 +1138,15 @@ def decode_num_from_embedding(model: DAEEmbeddingModel,
     Decode representasi laten y → nilai numerik kontinu (skala normalisasi).
 
     Mengimplementasikan g_θ' dari paper (Section 2.2) untuk kolom numerik:
-        z_raw = W'y + b'  (RAW logits) → slice per kolom numerik
-        → softmax(z_raw_col) → weighted sum atas midpoints bin
+        z = sigmoid(W'y + b')  → slice per kolom numerik
+        → normalisasi z_col / Σz_col → weighted sum atas midpoints bin
 
-    PERBAIKAN: Decoder kini mengeluarkan raw logits (bukan sigmoid).
-    softmax(raw_logits) benar karena menghasilkan distribusi probabilitas
-    yang valid (ΣP=1) untuk weighted sum atas bin midpoints.
-    Sebelumnya sigmoid(logits) tidak menjamin ΣP=1 sehingga weighted sum
-    tidak memiliki interpretasi probabilistik yang valid.
+    sigmoid menghasilkan Bernoulli params per elemen (bukan distribusi kategoris),
+    sehingga tidak secara otomatis menjamin ΣP=1. Normalisasi eksplisit dilakukan
+    sebelum weighted sum agar hasilnya memiliki interpretasi probabilistik yang benar.
 
     Alur (Weighted Sum / Soft Decode):
-        y → g_θ'(y) → z_raw_col [N, n_bins] → softmax → weighted sum @ mids
+        y → g_θ'(y) → z_col [N, n_bins] → normalize → weighted sum @ mids
 
     Kolom numerik diasumsikan berada di AWAL (indeks 0..n_num_cols-1).
 
@@ -1161,12 +1174,15 @@ def decode_num_from_embedding(model: DAEEmbeddingModel,
     all_preds = []
     with torch.no_grad():
         for (batch,) in loader:
-            recon_logits = model.decode(batch)  # list[n_cols] of [B, vocab_size_i]
+            recon_z = model.decode(batch)  # list[n_cols] of [B, vocab_size_i] sigmoid output
 
             batch_num_preds = []
             for col in range(n_num_cols):
-                logits  = recon_logits[col]                          # [B, n_bins_col]
-                probs   = torch.softmax(logits, dim=1)               # [B, n_bins_col]
+                z_col   = recon_z[col]                               # [B, n_bins_col] sigmoid prob
+                # Normalisasi menjadi distribusi valid sebelum weighted sum.
+                # sigmoid output tidak menjamin ΣP=1 per baris, sehingga perlu
+                # normalisasi eksplisit agar weighted sum memiliki interpretasi yang benar.
+                probs   = z_col / (z_col.sum(dim=1, keepdim=True) + 1e-8)  # [B, n_bins_col]
                 mids_t  = torch.tensor(
                     bin_midpoints[col], dtype=torch.float32, device=device
                 )                                                     # [n_bins_col]
