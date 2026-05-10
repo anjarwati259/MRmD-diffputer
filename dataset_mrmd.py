@@ -495,7 +495,7 @@ def train_supervised_embedding_model(cat_idx_array: np.ndarray,
     patience_counter = 0
     best_model_state = None
 
-    alpha = 0.7
+    alpha = 0.5
     beta  = 1.0
 
     model.train()
