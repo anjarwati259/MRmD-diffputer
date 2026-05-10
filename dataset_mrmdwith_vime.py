@@ -7,6 +7,7 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import os
 import json
 import time
+import pickle
 
 # MRmD helper functions (inline dari mrmd_discretizer.py)
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -421,7 +422,7 @@ class VIMEEmbeddingModel(nn.Module):
         self.out_dim   = hidden_dim
 
         # ── Encoder e: Linear → ReLU → Linear ────────────────────────────
-        # Sesuai GitHub jsyoon0823/VIME (vime_self.py, encoder layer)
+        # Sesuai paper Section 4.1 dan GitHub jsyoon0823/VIME
         self.encoder = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
             nn.ReLU(),
@@ -429,7 +430,8 @@ class VIMEEmbeddingModel(nn.Module):
         )
 
         # ── Feature Estimator sr: Linear → ReLU → Linear ─────────────────
-        # Sesuai GitHub jsyoon0823/VIME (vime_self.py, feature_estimator layer)
+        # sr: Z → X̂  (output = input_dim, yaitu full one-hot size)
+        # Sesuai paper: sr merekonstruksi seluruh vektor fitur x
         self.feature_estimator = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -437,11 +439,14 @@ class VIMEEmbeddingModel(nn.Module):
         )
 
         # ── Mask Estimator sm: Linear → ReLU → Linear → Sigmoid ──────────
-        # Sesuai GitHub jsyoon0823/VIME (vime_self.py, mask_estimator layer)
+        # [PERBAIKAN BUG #1] Paper Eq. 5 & Figure 1:
+        #   sm: Z → [0,1]^d  di mana d = n_cols (jumlah kolom/fitur)
+        #   BUKAN input_dim (total one-hot size).
+        #   Mask m ∈ {0,1}^d — satu bit per KOLOM, bukan per dimensi one-hot.
         self.mask_estimator = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, self.input_dim),
+            nn.Linear(hidden_dim, self.n_cols),   # output = n_cols sesuai paper
             nn.Sigmoid(),
         )
 
@@ -469,28 +474,49 @@ class VIMEEmbeddingModel(nn.Module):
         """
         Generate corrupted sample x_tilde dan mask m.
 
-        x_tilde = m ⊙ x_bar + (1-m) ⊙ x
-        m_j ~ Bernoulli(p_m) per fitur (dimensi one-hot)
-        x_bar[j] sampled dari empirical marginal (shuffled rows)
+        [PERBAIKAN BUG #2 — sesuai Paper Section 4.1 & Eq. 3]
+        Paper: mj ~ Bernoulli(pm) untuk setiap fitur/kolom ke-j (j=1..d).
+        Mask m ∈ {0,1}^d — SATU bit per KOLOM, bukan per dimensi one-hot.
 
-        Return: (x_tilde, m)  — keduanya [batch, input_dim]
+        Untuk one-hot encoded input:
+          - Jika kolom j di-mask (mj=1): seluruh dimensi one-hot kolom j
+            diganti dengan x_bar[j] (sampel dari empirical marginal)
+          - Jika kolom j tidak di-mask (mj=0): dimensi one-hot kolom j
+            dipertahankan dari x asli
+
+        x_tilde = m_expanded ⊙ x_bar + (1 - m_expanded) ⊙ x  (Eq. 3)
+
+        Return:
+          x_tilde     : [batch, input_dim]  — corrupted sample
+          m_col       : [batch, n_cols]     — mask per kolom (untuk loss lm, Eq. 5)
         """
         batch_size = x_onehot.shape[0]
         device     = x_onehot.device
 
-        # Mask: Bernoulli per dimensi (sesuai paper Eq. 3)
-        m = torch.bernoulli(
-            torch.full_like(x_onehot, self.p_m)
-        )  # [batch, input_dim]
+        # [PERBAIKAN] Mask per KOLOM sesuai paper: mj ~ Bernoulli(pm)
+        # Shape: [batch, n_cols]  — satu bit per kolom
+        m_col = torch.bernoulli(
+            torch.full((batch_size, self.n_cols), self.p_m, device=device)
+        )  # [batch, n_cols]
 
-        # x_bar: empirical marginal — shuffle rows secara random
+        # Expand mask ke dimensi one-hot: setiap kolom j di-expand ke all_dims[j] dimensi
+        # Sehingga seluruh one-hot dimensi suatu kolom di-mask bersama
+        m_expanded_parts = []
+        for j in range(self.n_cols):
+            # mj[i] → ulang all_dims[j] kali untuk kolom j
+            m_expanded_parts.append(
+                m_col[:, j:j+1].expand(-1, self.all_dims[j])  # [batch, all_dims[j]]
+            )
+        m_expanded = torch.cat(m_expanded_parts, dim=1)  # [batch, input_dim]
+
+        # x_bar: empirical marginal — shuffle rows secara random (per Eq. 3)
         perm  = torch.randperm(batch_size, device=device)
         x_bar = x_onehot[perm]   # [batch, input_dim]
 
-        # x_tilde = m ⊙ x_bar + (1 - m) ⊙ x  (Eq. 3)
-        x_tilde = m * x_bar + (1.0 - m) * x_onehot
+        # x_tilde = m_expanded ⊙ x_bar + (1 - m_expanded) ⊙ x  (Eq. 3)
+        x_tilde = m_expanded * x_bar + (1.0 - m_expanded) * x_onehot
 
-        return x_tilde, m
+        return x_tilde, m_col   # m_col [batch, n_cols] untuk loss lm
 
     # ── Forward pass ──────────────────────────────────────────────────────
 
@@ -532,21 +558,22 @@ class VIMEEmbeddingModel(nn.Module):
         Forward pass lengkap: corrupt → encode → estimasi mask & fitur.
 
         x_idx : [batch, n_cols]  int
-        return: (z, m_hat, x_hat_flat, m, x_onehot)
+        return: (z, m_hat, x_hat_flat, m_col, x_onehot)
           z          : [batch, hidden_dim]  — representasi encoder
-          m_hat      : [batch, input_dim]   — estimasi mask (Sigmoid)
-          x_hat_flat : [batch, input_dim]   — estimasi fitur asli
-          m          : [batch, input_dim]   — mask yang diaplikasikan
-          x_onehot   : [batch, input_dim]   — input asli (one-hot)
+          m_hat      : [batch, n_cols]      — estimasi mask per kolom (Sigmoid)
+          x_hat_flat : [batch, input_dim]   — estimasi fitur asli (one-hot)
+          m_col      : [batch, n_cols]      — mask per kolom yang diaplikasikan
+          x_onehot   : [batch, input_dim]   — input asli (one-hot float)
         """
-        x_onehot        = self.idx_to_onehot(x_idx)    # [batch, input_dim]
-        x_tilde, m      = self.corrupt(x_onehot)        # [batch, input_dim]
+        x_onehot           = self.idx_to_onehot(x_idx)      # [batch, input_dim]
+        x_tilde, m_col     = self.corrupt(x_onehot)          # x_tilde [batch, input_dim]
+                                                              # m_col   [batch, n_cols]
 
-        z               = self.encoder(x_tilde)          # [batch, hidden_dim]
-        m_hat           = self.mask_estimator(z)          # [batch, input_dim]
-        x_hat_flat      = self.feature_estimator(z)      # [batch, input_dim]
+        z                  = self.encoder(x_tilde)            # [batch, hidden_dim]
+        m_hat              = self.mask_estimator(z)            # [batch, n_cols]
+        x_hat_flat         = self.feature_estimator(z)        # [batch, input_dim]
 
-        return z, m_hat, x_hat_flat, m, x_onehot
+        return z, m_hat, x_hat_flat, m_col, x_onehot
 
 
 # ===========================================================================
@@ -569,34 +596,42 @@ def train_supervised_embedding_model(cat_idx_array: np.ndarray,
                                      noise_std: float = 0.01,
                                      patience: int = 30) -> 'VIMEEmbeddingModel':
     """
-    Latih VIME self-supervised encoder sebagai pengganti SupervisedLearnableEmbeddingModel.
+    Latih VIME self-supervised encoder.
 
     Signature dipertahankan agar main_mdlpwith.py tidak perlu diubah.
     Parameter yang tidak relevan untuk VIME (n_classes, dropout, use_mlp,
     mlp_ratio, noise_std) diterima tapi diabaikan.
 
-    Loss function sesuai paper (Eq. 4-6):
-      L = lm(m, m_hat) + alpha * lr(x, x_hat)
-      lm : BCE per dimensi one-hot (mask estimation)
-      lr : MSE per dimensi one-hot (feature reconstruction)
-           → untuk kolom kategorikal, MSE atas one-hot setara dengan mendorong
-             rekonstruksi ke one-hot asli (sesuai implementasi GitHub resmi
-             yang menggunakan MSE atas seluruh vektor fitur)
-
-    Catatan: paper menyebut cross-entropy untuk categorical variables (bawah Eq. 6),
-    namun implementasi GitHub resmi (vime_self.py) menggunakan MSE atas seluruh
-    input vector (termasuk one-hot categorical). Kami ikuti implementasi GitHub resmi.
+    Loss function sesuai paper Section 4.1 (Eq. 4-6):
+      L = lm(m, m̂) + α · lr(x, x̂)
+      lm : BCE per KOLOM (mask estimation, m ∈ {0,1}^d, d=n_cols)
+      lr : MSE untuk numerik (bin), CrossEntropy untuk kategorikal
+           sesuai keterangan eksplisit paper: "For categorical variables,
+           we modified Equation 6 to cross-entropy loss."
     """
-    # ── Hitung hidden_dim dari emb_sizes (ambil total emb dim sebagai hidden) ─
-    total_emb = sum(emb_sizes)
-    # Gunakan hidden_dim arg (dari caller) sebagai ukuran hidden VIME encoder
-    # Fallback: min(total_emb, 256) jika hidden_dim tidak di-pass eksplisit
+    # ── Hitung hidden_dim ────────────────────────────────────────────────
+    total_emb   = sum(emb_sizes)
     vime_hidden = hidden_dim if hidden_dim > 0 else min(total_emb, 256)
 
-    # p_m: masking probability (hyperparameter VIME, paper default ~0.3)
+    # n_num_cols_for_loss: berapa kolom pertama yang merupakan numerik (bin)
+    # Diturunkan dari n_classes tidak tersedia langsung, tapi caller meneruskan
+    # cat_dims = all_dims = [num_bins...] + [cat_sizes...].
+    # Karena kita tidak punya info terpisah di sini, kita pakai n_classes=0
+    # sebagai sinyal "tidak ada info", dan default ke 0 (semua dianggap kategorikal
+    # untuk loss CE). Caller yang benar harus meneruskan lewat parameter baru.
+    # [Catatan: n_classes dipakai sebagai proxy n_num_cols — lihat pemanggil]
+    n_num_cols_for_loss = n_classes   # diisi ulang dari caller (lihat load_dataset)
+
+    # p_m: masking probability (paper default ~0.3)
     p_m   = 0.3
     # alpha: bobot reconstruction loss (Eq. 4, paper default ~1.0)
     alpha = 1.0
+
+    # Fix random seed agar hasil embedding reproducible setiap run
+    torch.manual_seed(42)
+    np.random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
 
     model = VIMEEmbeddingModel(
         all_dims   = cat_dims,
@@ -607,9 +642,14 @@ def train_supervised_embedding_model(cat_idx_array: np.ndarray,
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    # Loss functions sesuai paper + GitHub resmi
-    bce_loss = nn.BCELoss()    # mask estimation loss lm (Eq. 5)
-    mse_loss = nn.MSELoss()    # feature reconstruction loss lr (Eq. 6)
+    # Loss functions sesuai paper
+    bce_loss = nn.BCELoss()                               # lm: mask BCE (Eq. 5)
+    mse_loss = nn.MSELoss()                               # lr numerik: MSE (Eq. 6)
+    ce_loss  = nn.CrossEntropyLoss()                      # lr kategorikal: CE (bawah Eq. 6)
+    device   = next(model.parameters()).device.type + (
+        ':' + str(next(model.parameters()).device.index)
+        if next(model.parameters()).device.type == 'cuda' else ''
+    )
 
     cat_tensor = torch.tensor(cat_idx_array, dtype=torch.long, device=device)
     dataset    = torch.utils.data.TensorDataset(cat_tensor)
@@ -638,19 +678,48 @@ def train_supervised_embedding_model(cat_idx_array: np.ndarray,
             optimizer.zero_grad()
 
             # Forward: corrupt → encode → estimasi mask & fitur
-            z, m_hat, x_hat_flat, m, x_onehot = model(batch_cat)
+            # m_col      : [batch, n_cols]     — mask per kolom (per paper Eq. 5)
+            # x_hat_flat : [batch, input_dim]  — rekonstruksi one-hot
+            # x_onehot   : [batch, input_dim]  — input asli one-hot
+            z, m_hat, x_hat_flat, m_col, x_onehot = model(batch_cat)
 
-            # ── Loss lm: mask estimation BCE (Eq. 5) ─────────────────────
-            # lm(m, m_hat) = -(1/d) * Σ_j [m_j log m_hat_j + (1-m_j) log(1-m_hat_j)]
-            loss_m = bce_loss(m_hat, m)
+            # ── Loss lm: mask estimation BCE (Paper Eq. 5) ───────────────
+            # lm(m, m̂) = -(1/d) Σj [ mj log m̂j + (1-mj) log(1-m̂j) ]
+            # m_hat: [batch, n_cols], m_col: [batch, n_cols]  ← sesuai paper
+            loss_m = bce_loss(m_hat, m_col)
 
-            # ── Loss lr: feature reconstruction MSE (Eq. 6) ──────────────
-            # lr(x, x_hat) = (1/d) * Σ_j (x_j - x_hat_j)^2
-            # Sesuai implementasi GitHub resmi (vime_self.py) yang menggunakan
-            # MSE atas seluruh vektor one-hot (bukan cross-entropy per kolom)
-            loss_r = mse_loss(x_hat_flat, x_onehot)
+            # ── Loss lr: feature reconstruction (Paper Eq. 6 + catatan) ──
+            # Paper: MSE untuk numerik, cross-entropy untuk kategorikal.
+            # "For categorical variables, we modified Equation 6 to
+            #  cross-entropy loss." — Paper Section 4.1
+            #
+            # Implementasi:
+            #   - Kolom numerik (indeks 0..n_num_cols-1 di all_dims):
+            #       MSE atas dimensi one-hot numerik
+            #   - Kolom kategorikal (indeks n_num_cols.. di all_dims):
+            #       CrossEntropy per kolom (logits vs argmax one-hot asli)
+            loss_r = torch.tensor(0.0, device=device)
+            n_num  = n_num_cols_for_loss   # diisi dari closure (lihat di bawah)
 
-            # ── Total loss (Eq. 4) ────────────────────────────────────────
+            offsets = model._offsets
+            for j in range(model.n_cols):
+                s = offsets[j]
+                e = offsets[j + 1]
+                x_hat_j  = x_hat_flat[:, s:e]   # [batch, vocab_j]
+                x_true_j = x_onehot[:, s:e]      # [batch, vocab_j]  (one-hot float)
+
+                if j < n_num:
+                    # Numerik (bin): MSE atas one-hot representasi
+                    loss_r = loss_r + mse_loss(x_hat_j, x_true_j)
+                else:
+                    # Kategorikal: cross-entropy
+                    # target = argmax dari one-hot asli → integer index
+                    target_j = x_true_j.argmax(dim=1)   # [batch]  int
+                    loss_r   = loss_r + ce_loss(x_hat_j, target_j)
+
+            loss_r = loss_r / model.n_cols   # rata-rata per kolom
+
+            # ── Total loss (Paper Eq. 4) ──────────────────────────────────
             # L = lm + alpha * lr
             loss = loss_m + alpha * loss_r
 
@@ -742,36 +811,73 @@ def encode_with_embedding(model: 'VIMEEmbeddingModel',
 def decode_cat_from_embedding(model: 'VIMEEmbeddingModel',
                               emb_array: np.ndarray,
                               device: str,
-                              batch_size: int = 4096) -> np.ndarray:
+                              batch_size: int = 4096,
+                              ref_embeddings: np.ndarray = None,
+                              ref_all_idx: np.ndarray = None) -> np.ndarray:
     """
-    Decode representasi laten VIME z → prediksi kelas tiap kolom (argmax logits).
-    Menggunakan feature_estimator (sr) sebagai decoder.
+    Decode representasi laten VIME z → prediksi kelas tiap kolom.
 
-    emb_array : [N, hidden_dim]
-    Return    : [N, n_cols]  — predicted integer index
+    [PERBAIKAN BUG UTAMA] Dua mode decode:
+
+    Mode 1 — Nearest-Neighbor di z-space (DEFAULT, dipakai saat ref tersedia):
+        Untuk setiap sampel z_i (hasil diffusion), cari z_ref paling dekat
+        (L2 distance) dari ref_embeddings (embedding observed/ground-truth).
+        Prediksi = label dari z_ref terdekat.
+        → Ini benar-benar iterasi-aware: hasil diffusion yang berbeda tiap
+          iterasi menghasilkan z berbeda → neighbor berbeda → label berbeda.
+
+    Mode 2 — VIME frozen decoder (FALLBACK, jika ref tidak tersedia):
+        Menggunakan feature_estimator sebagai decoder.
+        ⚠️ DETERMINISTIK: hasil sama tiap iterasi karena decoder di-freeze.
+        Hanya dipakai jika ref_embeddings/ref_all_idx tidak di-pass.
+
+    Parameter
+    ---------
+    emb_array       : [N, hidden_dim]  — embedding hasil diffusion (di-denorm)
+    ref_embeddings  : [N_ref, hidden_dim]  — embedding referensi (observed data)
+    ref_all_idx     : [N_ref, n_cols]  — label index referensi (ground truth)
     """
-    model.eval()
-    emb_tensor = torch.tensor(emb_array, dtype=torch.float32, device=device)
-    dataset    = torch.utils.data.TensorDataset(emb_tensor)
-    loader     = torch.utils.data.DataLoader(
-        dataset,
-        batch_size  = batch_size,
-        shuffle     = False,
-        num_workers = 0,
-        pin_memory  = False,
-    )
+    if ref_embeddings is not None and ref_all_idx is not None:
+        # ── Mode 1: Nearest-Neighbor di z-space ──────────────────────────
+        # Dibagi batch untuk efisiensi memori
+        N       = emb_array.shape[0]
+        n_cols  = ref_all_idx.shape[1]
+        all_pred = np.empty((N, n_cols), dtype=np.int64)
 
-    all_pred = []
-    with torch.no_grad():
-        for (batch,) in loader:
-            recon_logits = model.decode(batch)   # list[n_cols] of [B, vocab_j]
-            pred_idx = torch.stack([
-                torch.argmax(logits, dim=1)
-                for logits in recon_logits
-            ], dim=1)
-            all_pred.append(pred_idx.cpu().numpy())
+        ref_t   = torch.tensor(ref_embeddings, dtype=torch.float32, device=device)
 
-    return np.concatenate(all_pred, axis=0).astype(np.int64)
+        for start in range(0, N, batch_size):
+            end     = min(start + batch_size, N)
+            q       = torch.tensor(emb_array[start:end],
+                                   dtype=torch.float32, device=device)  # [B, D]
+            # Squared L2: ||q - ref||^2 = ||q||^2 + ||ref||^2 - 2*q@ref^T
+            dist2   = (q.pow(2).sum(1, keepdim=True)
+                       + ref_t.pow(2).sum(1).unsqueeze(0)
+                       - 2.0 * q @ ref_t.t())                           # [B, N_ref]
+            nn_idx  = dist2.argmin(dim=1).cpu().numpy()                  # [B]
+            all_pred[start:end] = ref_all_idx[nn_idx]                   # [B, n_cols]
+
+        return all_pred.astype(np.int64)
+
+    else:
+        # ── Mode 2: VIME frozen decoder (fallback deterministik) ──────────
+        model.eval()
+        emb_tensor = torch.tensor(emb_array, dtype=torch.float32, device=device)
+        dataset    = torch.utils.data.TensorDataset(emb_tensor)
+        loader     = torch.utils.data.DataLoader(
+            dataset, batch_size=batch_size, shuffle=False,
+            num_workers=0, pin_memory=False,
+        )
+        all_pred = []
+        with torch.no_grad():
+            for (batch,) in loader:
+                recon_logits = model.decode(batch)
+                pred_idx = torch.stack([
+                    torch.argmax(logits, dim=1)
+                    for logits in recon_logits
+                ], dim=1)
+                all_pred.append(pred_idx.cpu().numpy())
+        return np.concatenate(all_pred, axis=0).astype(np.int64)
 
 
 def decode_num_from_embedding(model: 'VIMEEmbeddingModel',
@@ -779,49 +885,76 @@ def decode_num_from_embedding(model: 'VIMEEmbeddingModel',
                               bin_midpoints: list,
                               n_num_cols: int,
                               device: str,
-                              batch_size: int = 4096) -> np.ndarray:
+                              batch_size: int = 4096,
+                              ref_embeddings: np.ndarray = None,
+                              ref_num_norm: np.ndarray = None) -> np.ndarray:
     """
     Decode representasi laten VIME z → nilai numerik kontinu (skala normalisasi).
 
-    Alur (Weighted Sum / Soft-Max Decode):
-      z → feature_estimator(z) → logits per kolom →
-      softmax → weighted sum dengan bin_midpoints
+    [PERBAIKAN BUG UTAMA] Dua mode decode:
 
-    emb_array     : [N, hidden_dim]
-    bin_midpoints : list[n_num_cols] of np.ndarray  — midpoint per bin, skala norm
-    n_num_cols    : int — jumlah kolom numerik (index pertama di all_dims)
-    Return        : [N, n_num_cols]  float32  — nilai kontinu skala normalisasi
+    Mode 1 — Nearest-Neighbor di z-space (DEFAULT, dipakai saat ref tersedia):
+        Untuk setiap z_i (hasil diffusion), cari z_ref paling dekat dari
+        ref_embeddings (embedding observed). Prediksi nilai numerik =
+        nilai asli ternormalisasi dari NN tersebut.
+        → Iterasi-aware: z berbeda tiap iterasi → NN berbeda → nilai berbeda.
+
+    Mode 2 — VIME frozen weighted-sum (FALLBACK):
+        z → feature_estimator → softmax → weighted sum bin_midpoints.
+        ⚠️ DETERMINISTIK: hasil sama tiap iterasi.
+
+    Parameter
+    ---------
+    emb_array      : [N, hidden_dim]  — embedding hasil diffusion (di-denorm)
+    bin_midpoints  : list[n_num_cols] — midpoint bin, skala normalisasi (Mode 2)
+    n_num_cols     : int
+    ref_embeddings : [N_ref, hidden_dim]  — embedding referensi (observed)
+    ref_num_norm   : [N_ref, n_num_cols]  — nilai numerik ternormalisasi (observed)
+    Return         : [N, n_num_cols]  float32
     """
-    model.eval()
-    emb_tensor = torch.tensor(emb_array, dtype=torch.float32, device=device)
-    dataset    = torch.utils.data.TensorDataset(emb_tensor)
-    loader     = torch.utils.data.DataLoader(
-        dataset,
-        batch_size  = batch_size,
-        shuffle     = False,
-        num_workers = 0,
-        pin_memory  = False,
-    )
+    if ref_embeddings is not None and ref_num_norm is not None:
+        # ── Mode 1: Nearest-Neighbor di z-space ──────────────────────────
+        N        = emb_array.shape[0]
+        all_pred = np.empty((N, n_num_cols), dtype=np.float32)
+        ref_t    = torch.tensor(ref_embeddings, dtype=torch.float32, device=device)
 
-    all_preds = []
-    with torch.no_grad():
-        for (batch,) in loader:
-            recon_logits = model.decode(batch)   # list[n_cols] of [B, vocab_j]
+        for start in range(0, N, batch_size):
+            end    = min(start + batch_size, N)
+            q      = torch.tensor(emb_array[start:end],
+                                  dtype=torch.float32, device=device)  # [B, D]
+            dist2  = (q.pow(2).sum(1, keepdim=True)
+                      + ref_t.pow(2).sum(1).unsqueeze(0)
+                      - 2.0 * q @ ref_t.t())                           # [B, N_ref]
+            nn_idx = dist2.argmin(dim=1).cpu().numpy()                  # [B]
+            all_pred[start:end] = ref_num_norm[nn_idx]                 # [B, n_num_cols]
 
-            batch_num_preds = []
-            for col in range(n_num_cols):
-                logits  = recon_logits[col]                           # [B, n_bins_col]
-                probs   = torch.softmax(logits, dim=1)                # [B, n_bins_col]
-                mids_t  = torch.tensor(
-                    bin_midpoints[col], dtype=torch.float32, device=device
-                )                                                      # [n_bins_col]
-                pred_col = (probs * mids_t.unsqueeze(0)).sum(dim=1)   # [B]
-                batch_num_preds.append(pred_col.unsqueeze(1))          # [B, 1]
+        return all_pred.astype(np.float32)
 
-            batch_num_preds = torch.cat(batch_num_preds, dim=1)       # [B, n_num_cols]
-            all_preds.append(batch_num_preds.cpu().numpy())
-
-    return np.concatenate(all_preds, axis=0).astype(np.float32)
+    else:
+        # ── Mode 2: VIME frozen weighted-sum (fallback deterministik) ─────
+        model.eval()
+        emb_tensor = torch.tensor(emb_array, dtype=torch.float32, device=device)
+        dataset    = torch.utils.data.TensorDataset(emb_tensor)
+        loader     = torch.utils.data.DataLoader(
+            dataset, batch_size=batch_size, shuffle=False,
+            num_workers=0, pin_memory=False,
+        )
+        all_preds = []
+        with torch.no_grad():
+            for (batch,) in loader:
+                recon_logits = model.decode(batch)
+                batch_num_preds = []
+                for col in range(n_num_cols):
+                    logits   = recon_logits[col]
+                    probs    = torch.softmax(logits, dim=1)
+                    mids_t   = torch.tensor(
+                        bin_midpoints[col], dtype=torch.float32, device=device
+                    )
+                    pred_col = (probs * mids_t.unsqueeze(0)).sum(dim=1)
+                    batch_num_preds.append(pred_col.unsqueeze(1))
+                batch_num_preds = torch.cat(batch_num_preds, dim=1)
+                all_preds.append(batch_num_preds.cpu().numpy())
+        return np.concatenate(all_preds, axis=0).astype(np.float32)
 
 
 # ===========================================================================
@@ -934,26 +1067,42 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         train_num = train_num_norm.astype(np.float32)
         test_num  = test_num_norm.astype(np.float32)
 
-        # ── MRmD Discretization ──────────────────────────────────────────
-        print(f'[MRmD] Menjalankan MRmD discretization pada {n_num_cols} kolom numerik ...')
-        mrmd = MRmDDiscretizer(val_size=0.125, N_D=50, random_state=42, verbose=False)
+        # ── MRmD Discretization (dengan cache) ──────────────────────────
+        mrmd_cache_path = f'cache/{dataname}/mrmd.pkl'
+        os.makedirs(f'cache/{dataname}', exist_ok=True)
 
-        # Fit MRmD pada data RAW train (bukan normalisasi) dengan label
-        t_mrmd_start = time.time()
-        mrmd.fit(train_num_raw, train_labels)
+        if os.path.exists(mrmd_cache_path):
+            # Load cut points dari cache, skip fitting
+            print(f'[MRmD] Cache ditemukan di {mrmd_cache_path}, skip fitting.')
+            with open(mrmd_cache_path, 'rb') as f:
+                mrmd = pickle.load(f)
+            t_mrmd = 0.0
+            print(f'[MRmD] Cut points di-load. n_bins per kolom: {mrmd.n_bins_}')
+        else:
+            # Fit MRmD pada data RAW train (bukan normalisasi) dengan label
+            print(f'[MRmD] Cache belum ada. Menjalankan MRmD discretization '
+                  f'pada {n_num_cols} kolom numerik ...')
+            t_mrmd_start = time.time()
+            mrmd = MRmDDiscretizer(val_size=0.125, N_D=50, random_state=42, verbose=False)
+            mrmd.fit(train_num_raw, train_labels)
+            t_mrmd = time.time() - t_mrmd_start
 
+            # Simpan objek mrmd (berisi cut_points_, x_min_, x_max_, n_bins_)
+            with open(mrmd_cache_path, 'wb') as f:
+                pickle.dump(mrmd, f)
+            print(f'[MRmD] Cache disimpan ke {mrmd_cache_path}')
+            print(f'[MRmD] Waktu komputasi diskritisasi: {t_mrmd:.4f}s')
+
+        # Transform train & test pakai cut points yang sama (fit atau cache)
         train_num_bin = mrmd.transform(train_num_raw)   # [N_train, n_num_cols] int64
         test_num_bin  = mrmd.transform(test_num_raw)    # [N_test,  n_num_cols] int64
 
         # Hitung bin midpoints dalam skala NORMALISASI
         # (dipakai saat decoding: bin index → nilai kontinu untuk MAE/RMSE)
         bin_midpoints = mrmd.get_bin_midpoints(train_num_norm, train_num_bin)
-        t_mrmd_end = time.time()
-        t_mrmd = t_mrmd_end - t_mrmd_start
 
         print(f'[MRmD] n_bins per kolom: {mrmd.n_bins_}')
         print(f'[MRmD] Total bins: {sum(mrmd.n_bins_)}')
-        print(f'[MRmD] Waktu komputasi diskritisasi: {t_mrmd:.4f}s')
 
     else:
         # Tidak ada fitur numerik
@@ -1032,7 +1181,7 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         labels        = train_labels,
         cat_dims      = all_dims,
         emb_sizes     = emb_sizes,
-        n_classes     = n_classes,
+        n_classes     = n_num_cols,    # dipakai sebagai n_num_cols_for_loss di training
         device        = device,
         n_epochs      = 1000,
         batch_size    = 1024,
@@ -1063,15 +1212,22 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
     test_X  = test_all_emb
 
     # ── Buat extended mask untuk VIME ────────────────────────────────────
-    # VIME encoder menghasilkan [N, hidden_dim] — satu vektor per sampel.
-    # Mask di level kolom asal [N, n_cols] perlu diperluas ke [N, hidden_dim].
+    # [PERBAIKAN BUG #2] Strategi mask yang benar untuk VIME:
     #
-    # Strategi: jika suatu sampel memiliki SETIDAKNYA SATU kolom yang missing,
-    # maka seluruh hidden_dim dimensi representasinya ditandai sebagai missing
-    # (karena encoder global merangkum semua kolom ke satu vektor).
+    # VIME encoder menghasilkan [N, hidden_dim] — satu vektor per sampel
+    # yang merangkum SEMUA kolom. Karena encoder global, sampel dengan
+    # missing value menghasilkan embedding yang "terkontaminasi" (kolom
+    # missing diisi 0 atau nilai default sebelum di-encode).
     #
-    # Ini konsisten dengan cara diffusion memanfaatkan mask: posisi True → perlu
-    # diimputasi, posisi False → observed (dipertahankan).
+    # Perbaikan: mask sampel yang memiliki SETIDAKNYA SATU kolom missing
+    # di seluruh dimensi hidden_dim (bukan per-dimensi), karena diffusion
+    # harus merekonstruksi seluruh embedding vektor untuk sampel tersebut.
+    #
+    # Ini membuat:
+    #   - Sampel fully-observed    → mask_train = False (semua dim)
+    #   - Sampel ada kolom missing → mask_train = True  (semua dim hidden_dim)
+    # Diffusion hanya memodifikasi embedding sampel yang missing,
+    # sampel fully-observed dipertahankan (observed constraint).
 
     # Kumpulkan mask kolom yang relevan (num + cat)
     train_num_mask = train_mask[:, num_col_idx].astype(bool) if n_num_cols > 0 else np.zeros((len(train_df), 0), dtype=bool)
@@ -1094,8 +1250,8 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
     train_any_missing = train_all_mask.any(axis=1)   # [N_train]
     test_any_missing  = test_all_mask.any(axis=1)    # [N_test]
 
-    # Perluas ke [N, hidden_dim]: sampel yang ada kolom missing →
-    # seluruh hidden_dim di-mask True
+    # Perluas ke [N, hidden_dim]: sampel dengan kolom missing →
+    # seluruh hidden_dim di-mask True (karena encoder bersifat global)
     extend_train_mask = np.tile(
         train_any_missing[:, np.newaxis], (1, vime_hidden_dim)
     )   # [N_train, hidden_dim]
@@ -1103,22 +1259,58 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         test_any_missing[:, np.newaxis],  (1, vime_hidden_dim)
     )   # [N_test, hidden_dim]
 
-    # Hitung bin_midpoints dalam skala normalisasi (dibutuhkan get_eval)
-    # Sudah dihitung di atas, disimpan di mrmd.bin_midpoints_ & bin_midpoints
+    # ── Simpan observed embeddings sebagai referensi untuk NN decode ──────
+    # [PERBAIKAN BUG #3] train_obs_emb / test_obs_emb adalah embedding dari
+    # sampel yang fully-observed (tidak ada kolom missing sama sekali).
+    # Dipakai oleh get_eval sebagai ref_embeddings untuk NN-decode yang
+    # iterasi-aware (bukan frozen VIME decoder).
+    #
+    # Untuk in-sample:  ref = sampel training yang fully-observed
+    # Untuk OOS:        ref = semua sampel training (fully-observed sebagai
+    #                   referensi proxy untuk decode test)
+    train_obs_mask = ~train_any_missing   # [N_train] True = fully observed
+    test_obs_mask  = ~test_any_missing    # [N_test]  True = fully observed
+
+    # Referensi untuk in-sample decode: training observed samples
+    if train_obs_mask.sum() > 0:
+        train_ref_emb     = train_all_emb[train_obs_mask]     # [N_obs_train, D]
+        train_ref_all_idx = train_all_idx[train_obs_mask]     # [N_obs_train, n_cols]
+        train_ref_num     = train_num[train_obs_mask] if n_num_cols > 0 else None
+    else:
+        # Fallback: pakai semua training data jika semua missing
+        train_ref_emb     = train_all_emb
+        train_ref_all_idx = train_all_idx
+        train_ref_num     = train_num if n_num_cols > 0 else None
+
+    # Referensi untuk OOS decode: semua training observed (proxy untuk test)
+    # (kita tidak bisa pakai test_obs karena test yang ingin kita prediksi)
+    test_ref_emb     = train_ref_emb      # pakai referensi yang sama
+    test_ref_all_idx = train_ref_all_idx
+    test_ref_num     = train_ref_num
+
+    print(f'[Ref] Train ref samples (fully-observed): {train_ref_emb.shape[0]}')
+    print(f'[Ref] Test  ref samples (dari train obs): {test_ref_emb.shape[0]}')
 
     return (train_X, test_X,
             train_mask, test_mask,
             train_num, test_num,
             train_all_idx, test_all_idx,
             extend_train_mask, extend_test_mask,
-            None,          # cat_bin_num (legacy)
+            None,              # cat_bin_num (legacy)
             emb_model,
             emb_sizes,
-            mrmd,          # [BARU] MRmDDiscretizer
-            bin_midpoints, # [BARU] list[n_num_cols] midpoint per bin, skala norm
-            n_num_cols,    # [BARU] jumlah kolom numerik
-            t_mrmd,        # [BARU] waktu komputasi MRmD discretization (detik)
-            t_emb)         # [BARU] waktu komputasi embedding training (detik)
+            mrmd,              # MRmDDiscretizer
+            bin_midpoints,     # list[n_num_cols] midpoint per bin, skala norm
+            n_num_cols,        # jumlah kolom numerik
+            t_mrmd,            # waktu komputasi MRmD discretization (detik)
+            t_emb,             # waktu komputasi embedding training (detik)
+            train_ref_emb,     # [BARU] referensi embedding in-sample (observed)
+            train_ref_all_idx, # [BARU] referensi label index in-sample
+            train_ref_num,     # [BARU] referensi nilai numerik in-sample (norm)
+            test_ref_emb,      # [BARU] referensi embedding OOS (dari train obs)
+            test_ref_all_idx,  # [BARU] referensi label index OOS
+            test_ref_num,      # [BARU] referensi nilai numerik OOS (norm)
+            )
 
 
 def mean_std(data, mask):
@@ -1139,39 +1331,35 @@ def get_eval(dataname, X_recon, X_true, truth_all_idx,
              num_num, emb_model, emb_sizes, mask,
              device='cpu', oos=False,
              bin_midpoints=None, n_num_cols=0,
-             num_true_norm=None):
+             num_true_norm=None,
+             ref_embeddings=None, ref_all_idx=None, ref_num_norm=None):
     """
     Hitung MAE, RMSE (numerik) dan Accuracy (kategorikal).
 
-    [MODIFIKASI] Numerik sekarang di-embed bersama kategorikal.
-    MAE/RMSE dihitung di skala normalisasi menggunakan ground truth
-    nilai asli (bukan midpoint bin) yang dipass via num_true_norm.
+    [PERBAIKAN] Evaluasi sekarang menggunakan Nearest-Neighbor di z-space
+    (bukan VIME frozen decoder) agar hasil berubah tiap iterasi sesuai
+    perbaikan diffusion.
 
-    Konvensi input:
+    Alur decode yang benar (iterasi-aware):
+    ----------------------------------------
+    X_recon (embedding diffusion, skala asli)
+      → cari NN di ref_embeddings (embedding observed)
+      → ambil label/nilai dari NN tersebut
+      → bandingkan dengan ground truth (truth_all_idx / num_true_norm)
+
+    Parameter baru:
     ---------------
-    X_recon / X_true : [N, total_emb_dim]
-        Seluruh dimensi adalah embedding. Tidak ada kolom raw numerik.
+    ref_embeddings : [N_ref, hidden_dim]  — embedding dari data observed
+                     (train_all_emb untuk in-sample, test_all_emb untuk OOS)
+    ref_all_idx    : [N_ref, n_cols]      — label index observed (ground truth)
+    ref_num_norm   : [N_ref, n_num_cols]  — nilai numerik ternormalisasi observed
 
-    Numerik (MAE/RMSE):
-        decode_num_from_embedding → bin index → midpoint (skala norm) [prediksi]
-        Ground truth: num_true_norm — nilai float asli ternormalisasi (skala norm)
-        MAE/RMSE dihitung di skala (X-mean)/std (normalisasi).
-
-    Kategorikal (Accuracy):
-        decode_cat_from_embedding → argmax logits → dibandingkan truth_all_idx
-        Sama persis dengan versi sebelumnya, hanya offset kolom bergeser
-        karena kolom numerik (bin) ada di awal.
-
-    Parameter
-    ---------
-    bin_midpoints  : list[n_num_cols] of np.ndarray  — midpoint per bin, skala norm
-                     (dipakai untuk decode prediksi)
-    n_num_cols     : int — jumlah kolom numerik
-    num_num        : int — DIABAIKAN (legacy, selalu 0 di pipeline baru ini)
-                          dipertahankan untuk kompatibilitas signature
-    truth_all_idx  : [N, n_num_cols + n_cat_cols]  integer index (bin + label)
-    num_true_norm  : [N, n_num_cols] float — nilai numerik asli ternormalisasi
-                     (skala (X-mean)/std). Jika None, fallback ke midpoint bin.
+    Parameter lama (dipertahankan untuk kompatibilitas):
+    ---------------
+    bin_midpoints  : dipakai sebagai fallback jika ref tidak tersedia
+    num_true_norm  : [N, n_num_cols] — ground truth nilai asli ternormalisasi
+    num_num        : DIABAIKAN (legacy)
+    truth_all_idx  : [N, n_num_cols + n_cat_cols]  — ground truth integer index
     """
     info_path = f'datasets/Info/{dataname}.json'
     with open(info_path, 'r') as f:
@@ -1204,19 +1392,18 @@ def get_eval(dataname, X_recon, X_true, truth_all_idx,
 
     if (n_num_cols > 0
             and num_mask is not None
-            and bin_midpoints is not None
             and emb_model is not None):
 
-        # Decode embedding → nilai kontinu prediksi (skala normalisasi) via bin midpoints
+        # [PERBAIKAN] Decode via NN di z-space (iterasi-aware)
+        # ref_num_norm = nilai numerik asli (observed) dari data referensi
         num_pred_norm = decode_num_from_embedding(
-            emb_model, X_recon, bin_midpoints, n_num_cols, device
+            emb_model, X_recon, bin_midpoints, n_num_cols, device,
+            ref_embeddings=ref_embeddings,
+            ref_num_norm=ref_num_norm,
         )  # [N, n_num_cols]
 
-        # Ground truth: gunakan nilai asli ternormalisasi (num_true_norm) jika tersedia.
-        # Ini adalah nilai float asli (X - mean) / std, bukan midpoint bin.
-        # Fallback ke midpoint bin hanya jika num_true_norm tidak dipass.
+        # Ground truth: nilai asli ternormalisasi (bukan midpoint bin)
         if num_true_norm is not None:
-            # Pastikan shape cocok (news dataset bisa ada row yang di-drop)
             gt_norm = num_true_norm
         else:
             # Fallback (legacy): lookup midpoint dari true bin index
@@ -1233,8 +1420,7 @@ def get_eval(dataname, X_recon, X_true, truth_all_idx,
         mae  = float(np.abs(diff).mean())
         rmse = float(np.sqrt((diff ** 2).mean()))
 
-    # ── Kategorikal: Akurasi via Linear Decoder ───────────────────────────
-    # [TIDAK BERUBAH] — logika sama, hanya offset kolom bergeser
+    # ── Kategorikal: Akurasi via NN di z-space ───────────────────────────
     acc = np.nan
     if (truth_all_idx is not None
             and len(cat_col_idx) > 0
@@ -1242,9 +1428,12 @@ def get_eval(dataname, X_recon, X_true, truth_all_idx,
             and emb_sizes is not None
             and cat_mask is not None):
 
-        # Decode semua kolom → predicted index
+        # [PERBAIKAN] Decode via NN di z-space menggunakan ref_embeddings
+        # ref_all_idx = label index dari data referensi (observed)
         pred_all_idx = decode_cat_from_embedding(
-            emb_model, X_recon, device
+            emb_model, X_recon, device,
+            ref_embeddings=ref_embeddings,
+            ref_all_idx=ref_all_idx,
         )  # [N, n_num_cols + n_cat_cols]
 
         # Kolom kategorikal berada di offset n_num_cols (setelah numerik)

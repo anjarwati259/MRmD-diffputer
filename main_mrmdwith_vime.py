@@ -23,10 +23,10 @@ parser.add_argument('--dataname',   type=str, default='california', help='Name o
 parser.add_argument('--gpu',        type=int, default=0,            help='GPU index.')
 parser.add_argument('--split_idx',  type=int, default=0,            help='Split idx.')
 parser.add_argument('--max_iter',   type=int, default=6,            help='Maximum iteration.')
-parser.add_argument('--ratio',      type=str, default=10,           help='Masking ratio.')
+parser.add_argument('--ratio',      type=str, default=30,           help='Masking ratio.')
 parser.add_argument('--hid_dim',    type=int, default=1024,         help='Hidden dimension.')
 parser.add_argument('--mask',       type=str, default='MCAR',       help='Masking mechanism.')
-parser.add_argument('--num_trials', type=int, default=20,            help='Number of sampling times.')
+parser.add_argument('--num_trials', type=int, default=10,            help='Number of sampling times.')
 parser.add_argument('--num_steps',  type=int, default=50,           help='Number of diffusion steps.')
 parser.add_argument('--noise_std',  type=float, default=0.01,       help='Noise std for embedding model.')
 parser.add_argument('--epochs',     type=int, default=10000,        help='Number of training epochs per iteration.')
@@ -78,11 +78,17 @@ if __name__ == '__main__':
      cat_bin_num,
      emb_model,
      emb_sizes,
-     mrmd,           # [BARU] MRmDDiscretizer (atau None jika tidak ada numerik)
-     bin_midpoints,  # [BARU] list[n_num_cols] midpoint per bin, skala normalisasi
-     n_num_cols,     # [BARU] jumlah kolom numerik
-     t_mrmd,         # [BARU] waktu komputasi MRmD discretization (detik)
-     t_emb           # [BARU] waktu komputasi embedding training (detik)
+     mrmd,               # MRmDDiscretizer (atau None jika tidak ada numerik)
+     bin_midpoints,      # list[n_num_cols] midpoint per bin, skala normalisasi
+     n_num_cols,         # jumlah kolom numerik
+     t_mrmd,             # waktu komputasi MRmD discretization (detik)
+     t_emb,              # waktu komputasi embedding training (detik)
+     train_ref_emb,      # [BARU] embedding referensi in-sample (fully-observed)
+     train_ref_all_idx,  # [BARU] label index referensi in-sample
+     train_ref_num,      # [BARU] nilai numerik referensi in-sample (norm)
+     test_ref_emb,       # [BARU] embedding referensi OOS (dari train observed)
+     test_ref_all_idx,   # [BARU] label index referensi OOS
+     test_ref_num,       # [BARU] nilai numerik referensi OOS (norm)
      ) = load_dataset(dataname, split_idx, mask_type, ratio, args.noise_std)
 
     t_total_preprocessing = t_mrmd + t_emb
@@ -124,8 +130,18 @@ if __name__ == '__main__':
     mean_X_gpu = torch.tensor(mean_X, device=device, dtype=torch.float32)
     std_X_gpu  = torch.tensor(std_X,  device=device, dtype=torch.float32)
 
-    # [MODIFIKASI] len_num = 0 karena tidak ada kolom raw numerik di train_X.
-    # Seluruh isi train_X adalah embedding (numerik bin + kategorikal).
+    # [PERBAIKAN] Pre-compute ref embeddings dalam skala yang konsisten dengan pred_X.
+    # pred_X di main = rec_X_np * 2 * std_np + mean_np  (skala embedding asli).
+    # train_ref_emb dari load_dataset = skala embedding asli (output VIME encoder).
+    # → Keduanya sudah di skala asli, tidak perlu transformasi tambahan.
+    # Namun kita simpan referensi ini di numpy agar siap dipakai tiap iterasi.
+    train_ref_emb_np     = train_ref_emb      # [N_obs, hidden_dim]  skala embedding asli
+    train_ref_all_idx_np = train_ref_all_idx  # [N_obs, n_cols]
+    train_ref_num_np     = train_ref_num      # [N_obs, n_num_cols] atau None
+    test_ref_emb_np      = test_ref_emb
+    test_ref_all_idx_np  = test_ref_all_idx
+    test_ref_num_np      = test_ref_num
+
     len_num = 0
 
     MAEs,  RMSEs,  ACCs  = [], [], []
@@ -317,20 +333,31 @@ if __name__ == '__main__':
         pred_X = pred_X * std_np + mean_np
         X_true = X_true * std_np + mean_np
 
+        # [PERBAIKAN] Denorm ref_embeddings ke skala asli yang sama
+        # agar NN search bekerja di ruang yang konsisten.
+        # train_ref_emb sudah di skala embedding asli (output VIME encoder),
+        # tidak perlu denorm karena train_X juga di skala embedding asli
+        # sebelum (X - mean_X) / std_X / 2.
+        # Kita denorm pred_X ke skala asli, ref juga harus di skala asli.
+        # Ref berasal dari train_all_emb (skala asli) → denorm konsisten.
+
         mae, rmse, acc = get_eval(
-            dataname      = dataname,
-            X_recon       = pred_X,
-            X_true        = X_true,
-            truth_all_idx = train_all_idx,
-            num_num       = len_num,          # selalu 0 di pipeline baru
-            emb_model     = emb_model,
-            emb_sizes     = emb_sizes,
-            mask          = ori_train_mask,
-            device        = device,
-            oos           = False,
-            bin_midpoints = bin_midpoints,    # untuk decode prediksi numerik
-            n_num_cols    = n_num_cols,
-            num_true_norm = train_num,        # ground truth nilai asli ternormalisasi
+            dataname       = dataname,
+            X_recon        = pred_X,
+            X_true         = X_true,
+            truth_all_idx  = train_all_idx,
+            num_num        = len_num,          # selalu 0 di pipeline baru
+            emb_model      = emb_model,
+            emb_sizes      = emb_sizes,
+            mask           = ori_train_mask,
+            device         = device,
+            oos            = False,
+            bin_midpoints  = bin_midpoints,
+            n_num_cols     = n_num_cols,
+            num_true_norm  = train_num,        # ground truth nilai asli ternormalisasi
+            ref_embeddings = train_ref_emb_np,    # [PERBAIKAN] embedding referensi (NN search)
+            ref_all_idx    = train_ref_all_idx_np,# [PERBAIKAN] label referensi
+            ref_num_norm   = train_ref_num_np,    # [PERBAIKAN] numerik referensi (norm)
         )
         MAEs.append(mae)
         RMSEs.append(rmse)
@@ -384,19 +411,22 @@ if __name__ == '__main__':
         X_true = X_true * std_np + mean_np
 
         mae_out, rmse_out, acc_out = get_eval(
-            dataname      = dataname,
-            X_recon       = pred_X,
-            X_true        = X_true,
-            truth_all_idx = test_all_idx,
-            num_num       = len_num,
-            emb_model     = emb_model,
-            emb_sizes     = emb_sizes,
-            mask          = ori_test_mask,
-            device        = device,
-            oos           = True,
-            bin_midpoints = bin_midpoints,
-            n_num_cols    = n_num_cols,
-            num_true_norm = test_num,         # ground truth nilai asli ternormalisasi
+            dataname       = dataname,
+            X_recon        = pred_X,
+            X_true         = X_true,
+            truth_all_idx  = test_all_idx,
+            num_num        = len_num,
+            emb_model      = emb_model,
+            emb_sizes      = emb_sizes,
+            mask           = ori_test_mask,
+            device         = device,
+            oos            = True,
+            bin_midpoints  = bin_midpoints,
+            n_num_cols     = n_num_cols,
+            num_true_norm  = test_num,          # ground truth nilai asli ternormalisasi
+            ref_embeddings = test_ref_emb_np,      # [PERBAIKAN] referensi dari train observed
+            ref_all_idx    = test_ref_all_idx_np,  # [PERBAIKAN]
+            ref_num_norm   = test_ref_num_np,      # [PERBAIKAN]
         )
         MAEs_out.append(mae_out)
         RMSEs_out.append(rmse_out)
