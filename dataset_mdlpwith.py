@@ -7,6 +7,7 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import os
 import json
 import time
+import pickle
 from scipy.stats import chi2
 
 DATA_DIR = 'datasets'
@@ -419,6 +420,12 @@ def train_supervised_embedding_model(cat_idx_array: np.ndarray,
     [TIDAK BERUBAH] — sama persis dengan versi sebelumnya.
     Sekarang cat_idx_array berisi SEMUA kolom (numerik bin + kategorikal).
     """
+    # Fix random seed agar hasil embedding reproducible setiap run
+    torch.manual_seed(42)
+    np.random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+
     model = SupervisedLearnableEmbeddingModel(
         cat_dims, emb_sizes, n_classes,
         dropout=dropout,
@@ -769,27 +776,43 @@ def load_dataset(dataname, idx=0, mask_type='MCAR', ratio='30', noise_std=0.01):
         train_num = train_num_norm.astype(np.float32)
         test_num  = test_num_norm.astype(np.float32)
 
-        # ── MDLP Discretization ──────────────────────────────────────────
-        print(f'[MDLP] Menjalankan MDLP discretization pada {n_num_cols} kolom numerik ...')
-        mdlp = MDLPDiscretizer(min_samples=3)
+        # ── MDLP Discretization (dengan cache) ──────────────────────────
+        mdlp_cache_path = f'cache/{dataname}/mdlp.pkl'
+        os.makedirs(f'cache/{dataname}', exist_ok=True)
 
-        # Fit MDLP pada train (observed) dengan label → transform train & test
-        # MDLP difit pada nilai RAW (bukan normalisasi) untuk konsistensi cut point
-        t_mdlp_start = time.time()
-        mdlp.fit(train_num_raw, train_labels)
+        if os.path.exists(mdlp_cache_path):
+            # Load cut points dari cache, skip fitting
+            print(f'[MDLP] Cache ditemukan di {mdlp_cache_path}, skip fitting.')
+            with open(mdlp_cache_path, 'rb') as f:
+                mdlp = pickle.load(f)
+            t_mdlp = 0.0
+            print(f'[MDLP] Cut points di-load. n_bins per kolom: {mdlp.n_bins_}')
+        else:
+            # Fit MDLP pada train (observed) dengan label → transform train & test
+            # MDLP difit pada nilai RAW (bukan normalisasi) untuk konsistensi cut point
+            print(f'[MDLP] Cache belum ada. Menjalankan MDLP discretization '
+                  f'pada {n_num_cols} kolom numerik ...')
+            t_mdlp_start = time.time()
+            mdlp = MDLPDiscretizer(min_samples=3)
+            mdlp.fit(train_num_raw, train_labels)
+            t_mdlp = time.time() - t_mdlp_start
 
+            # Simpan objek mdlp (berisi cut_points_, n_bins_)
+            with open(mdlp_cache_path, 'wb') as f:
+                pickle.dump(mdlp, f)
+            print(f'[MDLP] Cache disimpan ke {mdlp_cache_path}')
+            print(f'[MDLP] Waktu komputasi diskritisasi: {t_mdlp:.4f}s')
+
+        # Transform train & test pakai cut points yang sama (fit atau cache)
         train_num_bin = mdlp.transform(train_num_raw)   # [N_train, n_num_cols] int64
         test_num_bin  = mdlp.transform(test_num_raw)    # [N_test,  n_num_cols] int64
 
         # Hitung bin midpoints dalam skala NORMALISASI
         # (dipakai saat decoding: bin index → nilai kontinu untuk MAE/RMSE)
         bin_midpoints = mdlp.get_bin_midpoints(train_num_norm, train_num_bin)
-        t_mdlp_end = time.time()
-        t_mdlp = t_mdlp_end - t_mdlp_start
 
         print(f'[MDLP] n_bins per kolom: {mdlp.n_bins_}')
         print(f'[MDLP] Total bins: {sum(mdlp.n_bins_)}')
-        print(f'[MDLP] Waktu komputasi diskritisasi: {t_mdlp:.4f}s')
 
     else:
         # Tidak ada fitur numerik
