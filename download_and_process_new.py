@@ -15,6 +15,7 @@ DATA_DIR = 'datasets'
 
 NAME_URL_DICT = {
     'coupon': 'https://archive.ics.uci.edu/static/public/603/in+vehicle+coupon+recommendation.zip',
+    'churn':  'https://archive.ics.uci.edu/static/public/563/iranian+churn+dataset.zip',
 }
 
 # ─────────────────────────────────────────────
@@ -104,6 +105,43 @@ def process_stroke():
 
     data_df.to_csv(save_path, index=False)
     print(f'[stroke] Saved to {save_path}')
+    return data_df
+
+
+def process_churn():
+    """
+    Dataset: Iranian Churn Dataset (UCI id=563)
+    Preprocessing:
+      - Tidak ada missing value (dataset sudah bersih)
+      - Hapus kolom 'Customer ID' jika ada (bukan fitur)
+    """
+    # Cari file CSV di dalam folder churn
+    churn_dir = f'{DATA_DIR}/churn'
+    save_path = f'{churn_dir}/data.csv'
+
+    # Cari file CSV apapun di folder tersebut
+    csv_files = [f for f in os.listdir(churn_dir) if f.endswith('.csv')]
+    if not csv_files:
+        raise FileNotFoundError(f'[churn] Tidak ada file CSV di {churn_dir}')
+    raw_path = f'{churn_dir}/{csv_files[0]}'
+    print(f'[churn] Reading from {raw_path}')
+
+    data_df = pd.read_csv(raw_path)
+
+    # Hapus kolom ID jika ada
+    id_cols = [c for c in data_df.columns if 'id' in c.lower()]
+    if id_cols:
+        data_df = data_df.drop(columns=id_cols)
+        print(f'[churn] Dropped columns: {id_cols}')
+
+    # Tidak ada missing value, tapi tetap drop just in case
+    before = len(data_df)
+    data_df = data_df.dropna()
+    after = len(data_df)
+    print(f'[churn] Dropped {before - after} rows with missing values. Remaining: {after}')
+
+    data_df.to_csv(save_path, index=False)
+    print(f'[churn] Saved to {save_path}')
     return data_df
 
 
@@ -224,19 +262,32 @@ if __name__ == '__main__':
     os.makedirs(f'{DATA_DIR}/stroke', exist_ok=True)
 
     # ── 3. Preprocessing ──────────────────────────────────────────────────────
-    coupon_df = process_coupon()
-    stroke_df = process_stroke()     # akan raise error jika file belum ada
+    # coupon_df = process_coupon()
+    # stroke_df = process_stroke()     # akan raise error jika file belum ada
+    churn_df  = process_churn()
 
     # ── 4. Generate Info JSON ─────────────────────────────────────────────────
-    generate_info_json('coupon', coupon_df, target_col='Y')
-    generate_info_json('stroke', stroke_df, target_col='stroke')
+    # generate_info_json('coupon', coupon_df, target_col='Y')
+    # generate_info_json('stroke', stroke_df, target_col='stroke')
+
+    # churn: JSON dibuat manual (tidak pakai generate_info_json)
+    churn_info = {
+        "name": "churn",
+        "num_col_idx": [0, 2, 3, 4, 5, 6, 7, 8, 11, 12],
+        "cat_col_idx": [1, 9, 10],
+        "target_col_idx": [13]
+    }
+    os.makedirs(f'{DATA_DIR}/Info', exist_ok=True)
+    with open(f'{DATA_DIR}/Info/churn.json', 'w') as f:
+        json.dump(churn_info, f, indent=4)
+    print(f'[churn] Info JSON saved to {DATA_DIR}/Info/churn.json')
 
     # ── 5. Train / Test split ─────────────────────────────────────────────────
-    for name in ['coupon', 'stroke']:
+    for name in ['churn']:
         train_test_split(name, ratio=0.7)
 
     # ── 6. Generate masks (MCAR, MAR, MNAR) ──────────────────────────────────
-    for name in ['coupon', 'stroke']:
+    for name in ['churn']:
         for mask_type in ['MCAR', 'MAR', 'MNAR_logistic_T2']:
             for mask_p in [0.3]:
                 generate_mask(dataname=name,
@@ -249,12 +300,11 @@ if __name__ == '__main__':
     print('  datasets/')
     print('  ├── Info/')
     print('  │   ├── coupon.json')
-    print('  │   └── stroke.json')
+    print('  │   ├── stroke.json')
+    print('  │   └── churn.json')
     print('  ├── coupon/')
-    print('  │   ├── data.csv')
-    print('  │   ├── train.csv')
-    print('  │   └── test.csv')
-    print('  └── stroke/')
-    print('      ├── data.csv')
-    print('      ├── train.csv')
-    print('      └── test.csv')
+    print('  │   ├── data.csv, train.csv, test.csv')
+    print('  ├── stroke/')
+    print('  │   ├── data.csv, train.csv, test.csv')
+    print('  └── churn/')
+    print('      ├── data.csv, train.csv, test.csv')
