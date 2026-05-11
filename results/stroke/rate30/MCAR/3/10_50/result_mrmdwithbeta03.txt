@@ -1,0 +1,164 @@
+============================================================
+Iteration: 0
+Checkpoint dir: ckpt/stroke/rate30/MCAR/3/10_50
+[INFO] X_miss shape: torch.Size([3436, 34]), range: [-2.9027, 2.5921]
+MLPDiffusion(
+  (proj): Linear(in_features=34, out_features=1024, bias=True)
+  (mlp): Sequential(
+    (0): Linear(in_features=1024, out_features=2048, bias=True)
+    (1): SiLU()
+    (2): Linear(in_features=2048, out_features=2048, bias=True)
+    (3): SiLU()
+    (4): Linear(in_features=2048, out_features=1024, bias=True)
+    (5): SiLU()
+    (6): Linear(in_features=1024, out_features=34, bias=True)
+  )
+  (map_noise): PositionalEmbedding()
+  (time_embed): Sequential(
+    (0): Linear(in_features=1024, out_features=1024, bias=True)
+    (1): SiLU()
+    (2): Linear(in_features=1024, out_features=1024, bias=True)
+  )
+)
+Training:  36%|█████▋          | 3551/10001 [03:17<05:30, 19.53it/s, loss=0.466]Early stopping
+Training:  36%|█████▋          | 3551/10001 [03:17<05:59, 17.94it/s, loss=0.466]
+Training time: 197.9855s
+In-sample imputation: 100%|█████████████████████| 10/10 [03:05<00:00, 18.59s/it]
+In-sample imputation time: 185.98s
+In-sample  → MAE=0.623046  RMSE=0.877670  ACC=0.8161528804575254
+Out-of-sample imputation: 100%|█████████████████| 10/10 [01:20<00:00,  8.10s/it]
+Out-of-sample imputation time: 81.01s
+Out-of-sample → MAE=0.607445  RMSE=0.845755  ACC=0.8192182410423453
+
+[TIMING] Iteration 0 — Ringkasan Waktu:
+  - MRmD Discretization         : 0.0000s
+  - Embedding Training           : 25.3041s
+  - Diffusion Training           : 197.9855s
+  - In-sample Imputation         : 185.9831s
+  - Out-of-sample Imputation     : 81.0150s
+  - TOTAL (Diskrit→Imputasi)     : 490.2877s
+Results saved to results/stroke/rate30/MCAR/3/10_50
+
+============================================================
+Iteration: 1
+Checkpoint dir: ckpt/stroke/rate30/MCAR/3/10_50
+Loading X_miss from ckpt/stroke/rate30/MCAR/3/10_50/iter_1.npy
+[INFO] X_miss shape: torch.Size([3436, 34]), range: [-2.9027, 2.5921]
+Training:  35%|█████▋          | 3542/10001 [03:21<05:32, 19.43it/s, loss=0.451]Early stopping
+Training:  35%|█████▋          | 3542/10001 [03:21<06:06, 17.61it/s, loss=0.451]
+Training time: 201.1374s
+In-sample imputation: 100%|█████████████████████| 10/10 [03:06<00:00, 18.61s/it]
+In-sample imputation time: 186.23s
+In-sample  → MAE=0.550546  RMSE=0.798221  ACC=0.8573022736783373
+Out-of-sample imputation: 100%|█████████████████| 10/10 [01:21<00:00,  8.13s/it]
+Out-of-sample imputation time: 81.33s
+Out-of-sample → MAE=0.550891  RMSE=0.787139  ACC=0.8550488599348535
+
+[TIMING] Iteration 1 — Ringkasan Waktu:
+  - MRmD Discretization         : 0.0000s
+  - Embedding Training           : 25.3041s
+  - Diffusion Training           : 201.1374s
+  - In-sample Imputation         : 186.2345s
+  - Out-of-sample Imputation     : 81.3303s
+  - TOTAL (Diskrit→Imputasi)     : 494.0063s
+Results saved to results/stroke/rate30/MCAR/3/10_50
+
+============================================================
+Iteration: 2
+Checkpoint dir: ckpt/stroke/rate30/MCAR/3/10_50
+Loading X_miss from ckpt/stroke/rate30/MCAR/3/10_50/iter_2.npy
+[INFO] X_miss shape: torch.Size([3436, 34]), range: [-2.9027, 2.5921]
+Training:  35%|█████▋          | 3537/10001 [03:19<05:35, 19.29it/s, loss=0.438]Early stopping
+Training:  35%|█████▋          | 3537/10001 [03:19<06:04, 17.71it/s, loss=0.438]
+Training time: 199.6798s
+In-sample imputation: 100%|█████████████████████| 10/10 [03:06<00:00, 18.61s/it]
+In-sample imputation time: 186.19s
+In-sample  → MAE=0.523548  RMSE=0.773018  ACC=0.8706932626586693
+Out-of-sample imputation: 100%|█████████████████| 10/10 [01:21<00:00,  8.10s/it]
+Out-of-sample imputation time: 81.04s
+Out-of-sample → MAE=0.525000  RMSE=0.758703  ACC=0.8657980456026059
+
+[TIMING] Iteration 2 — Ringkasan Waktu:
+  - MRmD Discretization         : 0.0000s
+  - Embedding Training           : 25.3041s
+  - Diffusion Training           : 199.6798s
+  - In-sample Imputation         : 186.1881s
+  - Out-of-sample Imputation     : 81.0413s
+  - TOTAL (Diskrit→Imputasi)     : 492.2133s
+Results saved to results/stroke/rate30/MCAR/3/10_50
+
+============================================================
+Iteration: 3
+Checkpoint dir: ckpt/stroke/rate30/MCAR/3/10_50
+Loading X_miss from ckpt/stroke/rate30/MCAR/3/10_50/iter_3.npy
+[INFO] X_miss shape: torch.Size([3436, 34]), range: [-2.9027, 2.5921]
+Training:  44%|███████         | 4406/10001 [04:14<05:10, 18.05it/s, loss=0.405]Early stopping
+Training:  44%|███████         | 4406/10001 [04:14<05:22, 17.34it/s, loss=0.405]
+Training time: 254.1156s
+In-sample imputation: 100%|█████████████████████| 10/10 [03:06<00:00, 18.62s/it]
+In-sample imputation time: 186.27s
+In-sample  → MAE=0.522210  RMSE=0.773060  ACC=0.8672060259450411
+Out-of-sample imputation: 100%|█████████████████| 10/10 [01:21<00:00,  8.11s/it]
+Out-of-sample imputation time: 81.14s
+Out-of-sample → MAE=0.525116  RMSE=0.751675  ACC=0.8648208469055375
+
+[TIMING] Iteration 3 — Ringkasan Waktu:
+  - MRmD Discretization         : 0.0000s
+  - Embedding Training           : 25.3041s
+  - Diffusion Training           : 254.1156s
+  - In-sample Imputation         : 186.2738s
+  - Out-of-sample Imputation     : 81.1429s
+  - TOTAL (Diskrit→Imputasi)     : 546.8365s
+Results saved to results/stroke/rate30/MCAR/3/10_50
+
+============================================================
+Iteration: 4
+Checkpoint dir: ckpt/stroke/rate30/MCAR/3/10_50
+Loading X_miss from ckpt/stroke/rate30/MCAR/3/10_50/iter_4.npy
+[INFO] X_miss shape: torch.Size([3436, 34]), range: [-2.9027, 2.5921]
+Training:  29%|████▋           | 2907/10001 [02:52<06:11, 19.10it/s, loss=0.414]Early stopping
+Training:  29%|████▋           | 2908/10001 [02:53<07:02, 16.81it/s, loss=0.414]
+Training time: 173.0291s
+In-sample imputation: 100%|█████████████████████| 10/10 [03:06<00:00, 18.65s/it]
+In-sample imputation time: 186.57s
+In-sample  → MAE=0.520955  RMSE=0.769701  ACC=0.8718091784070303
+Out-of-sample imputation: 100%|█████████████████| 10/10 [01:21<00:00,  8.12s/it]
+Out-of-sample imputation time: 81.19s
+Out-of-sample → MAE=0.527230  RMSE=0.766379  ACC=0.8710097719869707
+
+[TIMING] Iteration 4 — Ringkasan Waktu:
+  - MRmD Discretization         : 0.0000s
+  - Embedding Training           : 25.3041s
+  - Diffusion Training           : 173.0291s
+  - In-sample Imputation         : 186.5690s
+  - Out-of-sample Imputation     : 81.1869s
+  - TOTAL (Diskrit→Imputasi)     : 466.0891s
+Results saved to results/stroke/rate30/MCAR/3/10_50
+
+============================================================
+Iteration: 5
+Checkpoint dir: ckpt/stroke/rate30/MCAR/3/10_50
+Loading X_miss from ckpt/stroke/rate30/MCAR/3/10_50/iter_5.npy
+[INFO] X_miss shape: torch.Size([3436, 34]), range: [-2.9027, 2.5921]
+Training:  27%|████▏           | 2652/10001 [02:42<06:34, 18.65it/s, loss=0.422]Early stopping
+Training:  27%|████▏           | 2652/10001 [02:42<07:29, 16.34it/s, loss=0.422]
+Training time: 162.3107s
+In-sample imputation: 100%|█████████████████████| 10/10 [03:06<00:00, 18.64s/it]
+In-sample imputation time: 186.47s
+In-sample  → MAE=0.524870  RMSE=0.767923  ACC=0.8732040730924815
+Out-of-sample imputation: 100%|█████████████████| 10/10 [01:21<00:00,  8.11s/it]
+Out-of-sample imputation time: 81.08s
+Out-of-sample → MAE=0.529650  RMSE=0.749902  ACC=0.8677524429967427
+
+[TIMING] Iteration 5 — Ringkasan Waktu:
+  - MRmD Discretization         : 0.0000s
+  - Embedding Training           : 25.3041s
+  - Diffusion Training           : 162.3107s
+  - In-sample Imputation         : 186.4658s
+  - Out-of-sample Imputation     : 81.0840s
+  - TOTAL (Diskrit→Imputasi)     : 455.1646s
+Results saved to results/stroke/rate30/MCAR/3/10_50
+
+============================================================
+[DONE] Semua 6 iterasi selesai.
+============================================================
