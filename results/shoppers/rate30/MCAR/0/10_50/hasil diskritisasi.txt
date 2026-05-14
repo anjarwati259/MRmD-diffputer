@@ -1,0 +1,14 @@
+[MDLP] n_bins per kolom: [4, 3, 1, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4, 4]
+[MDLP] Total bins: 37
+[MDLP] Waktu komputasi diskritisasi: 31.4507s
+[Embedding] all_dims (num_bin+cat)=[4, 3, 1, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4, 4, 2, 7, 4, 11, 11, 11, 11, 10, 10]
+[Embedding] emb_sizes=[3, 3, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 2, 5, 3, 6, 6, 6, 6, 6, 6], total_emb_dim=82
+[Embedding] Melatih SupervisedLearnableEmbeddingModel (classification + reconstruction loss) ...
+
+[MRmD] n_bins per kolom: [4, 5, 21, 26, 23, 21, 16, 18, 4, 4, 6, 5, 6, 8]
+[MRmD] Total bins: 167
+[MRmD] Waktu komputasi diskritisasi: 2030.8303s
+[Embedding] all_dims (num_bin+cat)=[4, 5, 21, 26, 23, 21, 16, 18, 4, 4, 6, 5, 6, 8, 2, 7, 4, 11, 11, 11, 11, 10, 10]
+[Embedding] emb_sizes=[3, 4, 9, 10, 9, 9, 8, 8, 3, 3, 4, 4, 4, 5, 2, 5, 3, 6, 6, 6, 6, 6, 6], total_emb_dim=129
+
+833 --> max_candidate
