@@ -1,0 +1,3 @@
+Remasker out sample MAE: 0.6275233030319214
+Remasker out sample RMSE: 0.8466305136680603
+Remasker out sample acc: 0.6930400525279055

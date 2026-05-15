@@ -1,0 +1,3 @@
+TabCSDI out sample MAE: 0.820497477653436
+TabCSDI out sample RMSE: 1.0308342326770161
+TabCSDI out sample acc: 0.58048

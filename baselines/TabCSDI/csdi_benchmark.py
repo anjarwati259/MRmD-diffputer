@@ -30,8 +30,8 @@ parser.add_argument("--mask_num", type=int, default=10, help="number of masks")
 args = parser.parse_args()
 print(args)
 
-datanames = ['bean', 'adult', 'beijing', 'california', 'default', 'gesture', 'letter', 'magic', 'news', 'shoppers'] 
-mask_types = ['MCAR', 'MAR', 'MNAR']
+datanames = ['stroke'] 
+mask_types = ['MCAR']
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'datasets'))
 
 os.environ["CUDA_LAUNCH_BLOCKING"] = "1"

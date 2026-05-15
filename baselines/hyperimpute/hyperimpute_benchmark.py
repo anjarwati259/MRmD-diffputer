@@ -10,18 +10,18 @@ import os
 import pdb 
 
 methods = [
- 'median',
- 'softimpute',
- 'gain',
- 'sklearn_missforest',
- 'most_frequent',
- 'mice',
- 'EM',
- 'miracle',
- 'ice',
- 'mean',
- 'miwae',
- 'hyperimpute',
+#  'median',
+#  'softimpute',
+#   'gain',
+#   'sklearn_missforest',
+#   'most_frequent',
+#   'mice',
+#  'EM',
+#  'miracle',
+#  'ice',
+#   'mean',
+#   'miwae',
+  'hyperimpute',
  ]
 
 parser = argparse.ArgumentParser(description='Missing Value Imputation')
@@ -34,10 +34,9 @@ parser.add_argument('--missing_rate', type=float, default=0.3)
 parser.add_argument('-benchmark_sample_size', action='store_true', help='Benchmark sample size or not')
 parser.add_argument('-benchmark_mask_ratio', action='store_true', help='Benchmark mask ratio or not')
 
-
 args = parser.parse_args()
 
-datanames = ['bean', 'california', 'adult', 'beijing', 'default', 'gesture', 'letter', 'magic', 'news', 'shoppers'] 
+datanames = ['shoppers'] 
 
 mask_type = args.mask_type
 mask_num = args.mask_num
@@ -45,9 +44,10 @@ retrain = args.retrain
 benchmark_sample_size = args.benchmark_sample_size
 benchmark_mask_ratio = args.benchmark_mask_ratio
 
+
 if benchmark_sample_size:
     subset_idx = get_subset_idx(total_num=29229, target_num=[1000, 6000, 11000, 16000]) #target_num need to be increase order
-    methods = ['hyperimpute', 'EM', 'sklearn_missforest']
+    methods = ['hyperimpute']
     mask_num = 3
 
 for method in methods:
@@ -60,11 +60,11 @@ for method in methods:
         assert args.mask_type == 'MCAR', 'Benchmark sample size only supports MCAR mask.'
     
     if benchmark_mask_ratio:
-        datanames = ['news', 'adult', 'beijing', 'default']
+        datanames = ['stroke']
     elif benchmark_sample_size:
-        datanames = ['beijing']
+        datanames = ['stroke']
     else:
-        datanames = ['bean', 'adult', 'beijing', 'california', 'default', 'gesture', 'letter', 'magic', 'news', 'shoppers']
+        datanames = ['stroke']
         
     for dataname in datanames:
         for missing_rate in missing_rates:
@@ -123,18 +123,44 @@ for method in methods:
 
                         ckpt_in_sample = f'stat_baseline_output/{mask_type}/in_sample_result/{dataname}/'
                         os.makedirs(ckpt_in_sample) if not os.path.exists(ckpt_in_sample) else None
+
+                        # ── NEW: out-sample checkpoint paths ──────────────────────────
+                        ckpt_test = f'stat_baseline_output/{mask_type}/filled_X/{dataname}/mask_{mask_idx}/test/'
+                        os.makedirs(ckpt_test) if not os.path.exists(ckpt_test) else None
+
+                        ckpt_out_sample = f'stat_baseline_output/{mask_type}/out_sample_result/{dataname}/'
+                        os.makedirs(ckpt_out_sample) if not os.path.exists(ckpt_out_sample) else None
+                        # ─────────────────────────────────────────────────────────────
+
                     elif args.benchmark_sample_size:
                         ckpt_train = f'stat_baseline_output/sensitive_analysis/sample_ratio/sample_size{sample_size}/{mask_type}/filled_X/{dataname}/mask_{mask_idx}/train/'
                         os.makedirs(ckpt_train) if not os.path.exists(ckpt_train) else None
 
                         ckpt_in_sample = f'stat_baseline_output/sensitive_analysis/sample_ratio/sample_size{sample_size}/{mask_type}/in_sample_result/{dataname}/'
                         os.makedirs(ckpt_in_sample) if not os.path.exists(ckpt_in_sample) else None
+
+                        # ── NEW: out-sample checkpoint paths (sample_size) ─────────────
+                        ckpt_test = f'stat_baseline_output/sensitive_analysis/sample_ratio/sample_size{sample_size}/{mask_type}/filled_X/{dataname}/mask_{mask_idx}/test/'
+                        os.makedirs(ckpt_test) if not os.path.exists(ckpt_test) else None
+
+                        ckpt_out_sample = f'stat_baseline_output/sensitive_analysis/sample_ratio/sample_size{sample_size}/{mask_type}/out_sample_result/{dataname}/'
+                        os.makedirs(ckpt_out_sample) if not os.path.exists(ckpt_out_sample) else None
+                        # ─────────────────────────────────────────────────────────────
+
                     elif args.benchmark_mask_ratio:
                         ckpt_train = f'stat_baselin[[e_output/sensitive_analysis/mask_ratio/{folder_name}/{mask_type}/filled_X/{dataname}/mask_{mask_idx}/train/'
                         os.makedirs(ckpt_train) if not os.path.exists(ckpt_train) else None
 
                         ckpt_in_sample = f'stat_baseline_output/sensitive_analysis/mask_ratio/{folder_name}/{mask_type}/in_sample_result/{dataname}/'
                         os.makedirs(ckpt_in_sample) if not os.path.exists(ckpt_in_sample) else None
+
+                        # ── NEW: out-sample checkpoint paths (mask_ratio) ─────────────
+                        ckpt_test = f'stat_baseline_output/sensitive_analysis/mask_ratio/{folder_name}/{mask_type}/filled_X/{dataname}/mask_{mask_idx}/test/'
+                        os.makedirs(ckpt_test) if not os.path.exists(ckpt_test) else None
+
+                        ckpt_out_sample = f'stat_baseline_output/sensitive_analysis/mask_ratio/{folder_name}/{mask_type}/out_sample_result/{dataname}/'
+                        os.makedirs(ckpt_out_sample) if not os.path.exists(ckpt_out_sample) else None
+                        # ─────────────────────────────────────────────────────────────
 
                     if os.path.exists(f'{ckpt_train}/{method}.npy'):
                         print(f'{method} already exists, skipping...')
@@ -179,4 +205,37 @@ for method in methods:
                         file.write(f"{method} in sample RMSE: {rmse}\n")
                         file.write(f"{method} in sample acc: {acc}\n")
 
-        
+                    # ── NEW: out-of-sample evaluation ──────────────────────────────────
+                    # Imputer already fitted on train; transform the test set.
+                    # test_X normalised with train statistics (same as train_X above) → fair comparison.
+                    # apply test mask
+                    x_test_miss = np.copy(test_X)
+                    x_test_miss[test_mask] = np.nan
+
+                    X_test_true_np = np.copy(test_X)
+
+                    X_test = pd.DataFrame(x_test_miss)
+
+                    # transform only – use the imputer already fitted on train
+                    X_test_filled = imputer.transform(X_test.copy())
+                    X_test_filled = X_test_filled.to_numpy()
+
+                    pred_X_test = X_test_filled[:]
+                    res_test = pred_X_test[:, len_num:] * std_train_X[len_num:] + mean_train_X[len_num:]
+                    pred_X_test[:, len_num:] = res_test
+
+                    mae_out, rmse_out, acc_out = 0.0, 0.0, 0.0
+                    mae_out, rmse_out, acc_out = get_eval(
+                        dataname, pred_X_test, X_test_true_np,
+                        test_cat_idx, test_num.shape[1], cat_bin_num, ori_test_mask
+                    )
+
+                    print(f'Saving {method} out-of-sample results...')
+                    # 1. save out-sample imputation
+                    np.save(f'{ckpt_test}/{method}.npy', X_test_filled)
+                    # 2. write out_sample performance
+                    with open(f'{ckpt_out_sample}/out_sample_result_mask{mask_idx}.txt', 'a+') as file:
+                        file.write(f"{method} out sample MAE: {mae_out}\n")
+                        file.write(f"{method} out sample RMSE: {rmse_out}\n")
+                        file.write(f"{method} out sample acc: {acc_out}\n")
+                    # ──────────────────────────────────────────────────────────────────
